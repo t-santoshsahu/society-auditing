@@ -474,6 +474,45 @@ def is_legacy_balance_reference(value: object) -> bool:
     return bool(re.fullmatch(r"[\d,]+(?:\.\d+)?\s*[DC]", rc.clean_string(value).upper()))
 
 
+def compact_fd_transactions(ws) -> None:
+    totals_gap = 10
+    summary_row = next(
+        (
+            row for row in range(2, ws.max_row + 1)
+            if rc.clean_string(ws.cell(row, 5).value).upper() == "FD TRANSACTION TOTALS"
+        ),
+        None,
+    )
+    if summary_row is None:
+        return
+
+    empty_rows = [
+        row for row in range(2, summary_row)
+        if not any(ws.cell(row, column).value not in (None, "") for column in range(1, 9))
+    ]
+    for row in reversed(empty_rows):
+        ws.delete_rows(row, 1)
+
+    data_rows = [
+        row for row in range(2, ws.max_row + 1)
+        if rc.clean_string(ws.cell(row, 3).value)
+    ]
+    summary_row = next(
+        row for row in range(2, ws.max_row + 1)
+        if rc.clean_string(ws.cell(row, 5).value).upper() == "FD TRANSACTION TOTALS"
+    )
+    last_data_row = max(data_rows, default=1)
+    desired_summary_row = last_data_row + totals_gap
+    if summary_row < desired_summary_row:
+        ws.insert_rows(summary_row, amount=desired_summary_row - summary_row)
+        summary_row = desired_summary_row
+    elif summary_row > desired_summary_row:
+        ws.delete_rows(desired_summary_row, amount=summary_row - desired_summary_row)
+        summary_row = desired_summary_row
+    ws.cell(summary_row + 1, 6).value = f"=SUM(F2:F{last_data_row})"
+    ws.cell(summary_row + 2, 7).value = f"=SUM(G2:G{last_data_row})"
+
+
 def link_expense_references_with_bank(expense_ws, bank_ws, bank_meta: dict) -> int:
     """Match expenses by user reference, then unique amount within Rs 1."""
     if expense_ws.max_column < rc.EXPENSE_COL_BANK_PAID:
@@ -854,11 +893,21 @@ def merge_draft(old_wb, new_wb) -> None:
         old_ws, new_ws = old_wb["Expense"], new_wb["Expense"]
         key_cols = [rc.VENDOR_COL_BILL_NO, rc.VENDOR_COL_NAME, rc.VENDOR_COL_AMOUNT]
         old_index = _index_rows(old_ws, 2, key_cols)
+        old_reference_index: dict[str, int] = {}
+        for old_row in range(2, old_ws.max_row + 1):
+            for reference in reference_parts(old_ws.cell(old_row, 16).value):
+                old_reference_index.setdefault(reference, old_row)
         merged = 0
         for row in range(2, new_ws.max_row + 1):
-            old_row = old_index.get(_row_key(new_ws, row, key_cols))
+            old_row = None
+            for reference in reference_parts(new_ws.cell(row, 16).value):
+                old_row = old_reference_index.get(reference)
+                if old_row is not None:
+                    break
+            if old_row is None:
+                old_row = old_index.get(_row_key(new_ws, row, key_cols))
             if old_row is not None:
-                merged += _copy_columns(old_ws, old_row, new_ws, row, [16])
+                merged += _copy_columns(old_ws, old_row, new_ws, row, [5, 16])
         removed = 0
         for row in range(new_ws.max_row, 1, -1):
             payment_references = {
@@ -978,6 +1027,7 @@ def merge_draft(old_wb, new_wb) -> None:
                 bank_reference = rc.clean_string(other_ws.cell(row, 14).value).upper()
                 if bank_reference in appended_refs:
                     other_ws.delete_rows(row, 1)
+        compact_fd_transactions(new_ws)
         print(f"FD Transactions          : preserved {merged} existing FD row value(s)")
 
     # Cash withdrawal registers are fully manual entry areas - keep them intact.
