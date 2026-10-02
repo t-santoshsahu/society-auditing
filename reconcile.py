@@ -70,7 +70,7 @@ GST_AMOUNT_FORMAT = '0.00'
 OTHER_INCOME_TYPES = (
     "MoveInMoveOut",
     "Classes",
-    "Sponsorship",
+    "Screen Rentals",
     "Amenities Rentals",
     "Services",
     "Fund",
@@ -1390,7 +1390,7 @@ def process_other_income_sources(gst_invoice_ws, bank_ws, output_wb, bank_meta: 
         if bill_no.upper().startswith("MIMO"):
             other_income_ws.cell(out_row, 12).value = "MoveInMoveOut"
         elif bill_no.upper().startswith("SPONSOR/"):
-            other_income_ws.cell(out_row, 12).value = "Sponsorship"
+            other_income_ws.cell(out_row, 12).value = "Screen Rentals"
         else:
             other_income_ws.cell(out_row, 12).value = None
 

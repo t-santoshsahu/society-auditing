@@ -39,6 +39,7 @@ from typing import Any, Optional
 
 from openpyxl import load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.styles import Font
 
 import reconcile as rc
 
@@ -685,6 +686,75 @@ def link_other_income_with_bank(other_income_ws, bank_ws, bank_meta: dict) -> in
     return linked
 
 
+def remove_resolved_auto_other_income_rows(other_income_ws, bank_ws, bank_meta: dict) -> int:
+    """Remove generated pending deposits after their bank row is matched elsewhere."""
+    header_row = bank_meta["header_row"]
+    last_row = rc.find_last_bank_data_row(bank_ws, header_row)
+    bank_rows_by_ref: dict[str, list[int]] = {}
+    for row in range(header_row + 1, last_row + 1):
+        reference = rc.clean_string(bank_ws.cell(row, 6).value).upper()
+        if reference:
+            bank_rows_by_ref.setdefault(reference, []).append(row)
+
+    removed = 0
+    for row in range(other_income_ws.max_row, 1, -1):
+        bill_number = rc.clean_string(other_income_ws.cell(row, 1).value).upper()
+        ledger = rc.clean_string(other_income_ws.cell(row, 2).value)
+        income_type = rc.clean_string(other_income_ws.cell(row, 12).value)
+        reference = rc.clean_string(other_income_ws.cell(row, 14).value).upper()
+        status = rc.clean_string(other_income_ws.cell(row, 16).value).upper()
+        if (
+            not re.fullmatch(r"[A-F0-9]{16}", bill_number)
+            or ledger
+            or income_type
+            or status != "PENDING"
+            or not reference
+            or len(bank_rows_by_ref.get(reference, [])) != 1
+        ):
+            continue
+        bank_status = rc.clean_string(
+            bank_ws.cell(bank_rows_by_ref[reference][0], 9).value
+        ).upper()
+        if bank_status.startswith("MATCHED") or bank_status == "FD TRANSFER":
+            other_income_ws.delete_rows(row, 1)
+            removed += 1
+    if removed:
+        summary_start = next(
+            (
+                row for row in range(1, other_income_ws.max_row + 1)
+                if rc.clean_string(other_income_ws.cell(row, 1).value).upper() == "INCOME TYPE"
+                and rc.clean_string(other_income_ws.cell(row, 2).value).upper() == "TOTAL AMOUNT"
+            ),
+            None,
+        )
+        total_row = next(
+            (
+                row for row in range((summary_start or 1) + 1, other_income_ws.max_row + 1)
+                if rc.clean_string(other_income_ws.cell(row, 1).value).upper() == "TOTAL GST"
+            ),
+            None,
+        )
+        if summary_start and total_row:
+            data_end = summary_start - 1
+            for data_row in range(2, data_end + 1):
+                if not any(other_income_ws.cell(data_row, col).value not in (None, "") for col in range(1, 17)):
+                    continue
+                other_income_ws.cell(data_row, 7).value = f"=ROUND((E{data_row}-F{data_row})/(1+2*H{data_row}),2)"
+                other_income_ws.cell(data_row, 9).value = f"=ROUND(G{data_row}*H{data_row},2)"
+                other_income_ws.cell(data_row, 10).value = f"=ROUND(G{data_row}*H{data_row},2)"
+            for summary_row in range(summary_start + 1, total_row):
+                for col, source_col in ((2, "E"), (3, "G"), (4, "I"), (5, "J"), (6, "K")):
+                    other_income_ws.cell(summary_row, col).value = (
+                        f"=SUMIF($L$2:$L${data_end},$A{summary_row},${source_col}$2:${source_col}${data_end})"
+                    )
+                other_income_ws.cell(summary_row, 7).value = f"=SUM(D{summary_row}:F{summary_row})"
+            for col in range(2, 8):
+                other_income_ws.cell(total_row, col).value = (
+                    f"=SUM({rc.get_column_letter(col)}{summary_start + 1}:{rc.get_column_letter(col)}{total_row - 1})"
+                )
+    return removed
+
+
 def link_recorded_income_with_bank(income_ws, bank_ws, bank_meta: dict) -> int:
     """Resolve NBH income rows using settlement/reference IDs and amounts."""
     headers = {
@@ -962,6 +1032,8 @@ def merge_draft(old_wb, new_wb) -> None:
             old_row = old_index.get(_row_key(new_ws, row, [1]))
             if old_row is not None:
                 merged += _copy_columns(old_ws, old_row, new_ws, row, [2, 12, 14, 17])
+                if rc.clean_string(new_ws.cell(row, 12).value).upper() == "SPONSORSHIP":
+                    new_ws.cell(row, 12).value = "Screen Rentals"
         print(f"Income from Other Sources: preserved {merged} values/identifier(s), removed {removed} merged duplicate row(s)")
 
     if "FD Transactions" in old_wb.sheetnames and "FD Transactions" in new_wb.sheetnames:
@@ -1567,6 +1639,97 @@ def remove_quarterly_other_income_duplicates(
     return removed
 
 
+def consolidate_cross_month_other_income(month_dirs: list[Path]) -> int:
+    """Keep GST invoice rows canonical and remove duplicate bank-receipt rows."""
+    workbooks = []
+    canonical_rows: dict[str, list[tuple[Any, int, float]]] = {}
+    try:
+        for month_dir in month_dirs:
+            draft_path = resolve_draft_path(month_dir)
+            if not draft_path.exists():
+                continue
+            workbook = load_workbook(draft_path, data_only=False)
+            workbooks.append((month_dir, draft_path, workbook))
+            if "Income from Other Sources" not in workbook.sheetnames:
+                continue
+            worksheet = workbook["Income from Other Sources"]
+            summary_start = next(
+                (
+                    row for row in range(1, worksheet.max_row + 1)
+                    if rc.clean_string(worksheet.cell(row, 1).value).upper() == "INCOME TYPE"
+                    and rc.clean_string(worksheet.cell(row, 2).value).upper() == "TOTAL AMOUNT"
+                ),
+                worksheet.max_row + 1,
+            )
+            for row in range(2, summary_start):
+                bill_number = rc.clean_string(worksheet.cell(row, 1).value).upper()
+                row_type = rc.clean_string(worksheet.cell(row, 4).value).upper()
+                amount = rc.numeric_amount(worksheet.cell(row, 5).value)
+                if bill_number and row_type != "BANK RECEIPT" and amount > 0:
+                    canonical_rows.setdefault(bill_number, []).append((workbook, row, amount))
+
+        removed = 0
+        affected_workbooks: set[int] = set()
+        for source_month_dir, _, workbook in workbooks:
+            if "Income from Other Sources" not in workbook.sheetnames:
+                continue
+            worksheet = workbook["Income from Other Sources"]
+            summary_start = next(
+                (
+                    row for row in range(1, worksheet.max_row + 1)
+                    if rc.clean_string(worksheet.cell(row, 1).value).upper() == "INCOME TYPE"
+                    and rc.clean_string(worksheet.cell(row, 2).value).upper() == "TOTAL AMOUNT"
+                ),
+                worksheet.max_row + 1,
+            )
+            rows_to_delete = []
+            for row in range(2, summary_start):
+                bill_number = rc.clean_string(worksheet.cell(row, 1).value).upper()
+                if not bill_number or rc.clean_string(worksheet.cell(row, 4).value).upper() != "BANK RECEIPT":
+                    continue
+                amount = rc.numeric_amount(worksheet.cell(row, 5).value)
+                candidates = [
+                    candidate for candidate in canonical_rows.get(bill_number, [])
+                    if candidate[0] is not workbook and rc.money_equal(candidate[2], amount)
+                ]
+                if len(candidates) != 1:
+                    continue
+
+                canonical_workbook, canonical_row, _ = candidates[0]
+                canonical_ws = canonical_workbook["Income from Other Sources"]
+                for column in (13, 14, 15, 16):
+                    value = worksheet.cell(row, column).value
+                    if value not in (None, ""):
+                        canonical_ws.cell(canonical_row, column).value = value
+                canonical_ws.cell(canonical_row, 16).value = (
+                    f"MATCHED (Cross-month | Bank detail month: {source_month_dir.name})"
+                )
+                for column in range(1, 17):
+                    canonical_ws.cell(canonical_row, column).fill = copy(rc.GREEN_FILL)
+                rows_to_delete.append(row)
+                affected_workbooks.add(id(workbook))
+                affected_workbooks.add(id(canonical_workbook))
+
+            for row in reversed(rows_to_delete):
+                worksheet.delete_rows(row, 1)
+                removed += 1
+
+        for _, _, workbook in workbooks:
+            if id(workbook) not in affected_workbooks:
+                continue
+            worksheet = workbook["Income from Other Sources"]
+            refresh_other_income_categories(worksheet)
+
+        for _, draft_path, workbook in workbooks:
+            if id(workbook) in affected_workbooks:
+                finalize_workbook_layout(workbook)
+                workbook.save(draft_path)
+        return removed
+    finally:
+        for _, _, workbook in workbooks:
+            workbook.close()
+
+
 # =============================================================
 # MAIN ORCHESTRATION
 # =============================================================
@@ -1595,6 +1758,182 @@ def finalize_workbook_layout(wb) -> None:
     )
     ordered_names.extend(name for name in wb.sheetnames if name not in ordered_names)
     wb._sheets = [wb[name] for name in ordered_names]
+
+
+def _quarter_months(year: int, month: int) -> list[tuple[int, int]]:
+    quarter_end = month + ((3 - month % 3) % 3)
+    return [
+        (year if quarter_end - offset > 0 else year - 1,
+         ((quarter_end - offset - 1) % 12) + 1)
+        for offset in (2, 1, 0)
+    ]
+
+
+def _quarterly_gst_rows(month_dir: Path) -> list[dict[str, Any]]:
+    draft_path = resolve_draft_path(month_dir)
+    if not draft_path.exists():
+        return []
+
+    rows = []
+    workbook = load_workbook(draft_path, data_only=False)
+    try:
+        if "Income from Other Sources" not in workbook.sheetnames:
+            return rows
+        worksheet = workbook["Income from Other Sources"]
+        summary_start = next(
+            (
+                row for row in range(1, worksheet.max_row + 1)
+                if rc.clean_string(worksheet.cell(row, 1).value).upper() == "INCOME TYPE"
+                and rc.clean_string(worksheet.cell(row, 2).value).upper() == "TOTAL AMOUNT"
+            ),
+            worksheet.max_row + 1,
+        )
+        year, month = parse_month_dir_name(month_dir.name)
+        month_label = datetime(year, month, 1).strftime("%B %Y")
+        for row in range(2, summary_start):
+            total_amount = rc.numeric_amount(worksheet.cell(row, 5).value)
+            non_taxable = rc.numeric_amount(worksheet.cell(row, 6).value)
+            percentage = rc.numeric_amount(worksheet.cell(row, 8).value)
+            if total_amount <= 0 and non_taxable <= 0:
+                continue
+            taxable = round((total_amount - non_taxable) / (1 + 2 * percentage), 2)
+            cgst = round(taxable * percentage, 2)
+            sgst = round(taxable * percentage, 2)
+            igst = rc.numeric_amount(worksheet.cell(row, 11).value)
+            rows.append({
+                "month": month_label,
+                "bill_number": rc.clean_string(worksheet.cell(row, 1).value),
+                "ledger": rc.clean_string(worksheet.cell(row, 2).value),
+                "income_type": rc.clean_string(worksheet.cell(row, 12).value) or "Unclassified",
+                "total_amount": total_amount,
+                "non_taxable": non_taxable,
+                "taxable": taxable,
+                "cgst": cgst,
+                "sgst": sgst,
+                "igst": igst,
+            })
+    finally:
+        workbook.close()
+    return rows
+
+
+def rebuild_quarterly_gst_sheets(data_root: Path, month_dirs: list[Path]) -> int:
+    """Replace quarter-end GST sheets with totals from reconciled month sheets."""
+    month_by_period = {
+        parse_month_dir_name(month_dir.name): month_dir for month_dir in month_dirs
+    }
+    quarter_ends = {period for period in month_by_period if period[1] % 3 == 0}
+    rebuilt = 0
+
+    for month_dir in month_dirs:
+        draft_path = resolve_draft_path(month_dir)
+        if not draft_path.exists():
+            continue
+        year, month = parse_month_dir_name(month_dir.name)
+        workbook = load_workbook(draft_path)
+        try:
+            for sheet_name in list(workbook.sheetnames):
+                if sheet_name.startswith("Quarterly GST"):
+                    del workbook[sheet_name]
+
+            if (year, month) not in quarter_ends:
+                workbook.save(draft_path)
+                continue
+
+            quarter_periods = _quarter_months(year, month)
+            if not all(period in month_by_period for period in quarter_periods):
+                workbook.save(draft_path)
+                continue
+
+            detail_rows = []
+            for period in quarter_periods:
+                detail_rows.extend(_quarterly_gst_rows(month_by_period[period]))
+            worksheet = workbook.create_sheet("Quarterly GST")
+            worksheet.append([
+                "Month", "Bill Number", "Ledger Name", "Income Type", "Total Amount",
+                "Non Taxable Amount", "Taxable Amount", "CGST", "SGST", "IGST", "Total GST",
+            ])
+            for item in detail_rows:
+                worksheet.append([
+                    item["month"], item["bill_number"], item["ledger"], item["income_type"],
+                    item["total_amount"], item["non_taxable"], item["taxable"], item["cgst"],
+                    item["sgst"], item["igst"], item["cgst"] + item["sgst"] + item["igst"],
+                ])
+            detail_end = worksheet.max_row
+            rc.style_header(worksheet, 1)
+
+            worksheet.append([])
+            worksheet.append(["Monthly Totals"])
+            worksheet.append(["Month", "Total Amount", "Non Taxable Amount", "Taxable Amount", "CGST", "SGST", "IGST", "Total GST"])
+            monthly_start = worksheet.max_row + 1
+            for period in quarter_periods:
+                month_label = datetime(*period, 1).strftime("%B %Y")
+                monthly_rows = [item for item in detail_rows if item["month"] == month_label]
+                worksheet.append([
+                    month_label,
+                    sum(item["total_amount"] for item in monthly_rows),
+                    sum(item["non_taxable"] for item in monthly_rows),
+                    sum(item["taxable"] for item in monthly_rows),
+                    sum(item["cgst"] for item in monthly_rows),
+                    sum(item["sgst"] for item in monthly_rows),
+                    sum(item["igst"] for item in monthly_rows),
+                    sum(item["cgst"] + item["sgst"] + item["igst"] for item in monthly_rows),
+                ])
+            worksheet.append([
+                "Quarter Total",
+                sum(item["total_amount"] for item in detail_rows),
+                sum(item["non_taxable"] for item in detail_rows),
+                sum(item["taxable"] for item in detail_rows),
+                sum(item["cgst"] for item in detail_rows),
+                sum(item["sgst"] for item in detail_rows),
+                sum(item["igst"] for item in detail_rows),
+                sum(item["cgst"] + item["sgst"] + item["igst"] for item in detail_rows),
+            ])
+            for column in range(1, 9):
+                worksheet.cell(worksheet.max_row, column).font = Font(bold=True)
+            rc.style_header(worksheet, monthly_start - 1)
+
+            worksheet.append([])
+            worksheet.append(["Quarter Totals by Income Type"])
+            worksheet.append(["Income Type", "Total Amount", "Non Taxable Amount", "Taxable Amount", "CGST", "SGST", "IGST", "Total GST"])
+            category_start = worksheet.max_row + 1
+            categories = sorted({item["income_type"] for item in detail_rows})
+            for category in categories:
+                category_rows = [item for item in detail_rows if item["income_type"] == category]
+                worksheet.append([
+                    category,
+                    sum(item["total_amount"] for item in category_rows),
+                    sum(item["non_taxable"] for item in category_rows),
+                    sum(item["taxable"] for item in category_rows),
+                    sum(item["cgst"] for item in category_rows),
+                    sum(item["sgst"] for item in category_rows),
+                    sum(item["igst"] for item in category_rows),
+                    sum(item["cgst"] + item["sgst"] + item["igst"] for item in category_rows),
+                ])
+            worksheet.append([
+                "Quarter Total",
+                sum(item["total_amount"] for item in detail_rows),
+                sum(item["non_taxable"] for item in detail_rows),
+                sum(item["taxable"] for item in detail_rows),
+                sum(item["cgst"] for item in detail_rows),
+                sum(item["sgst"] for item in detail_rows),
+                sum(item["igst"] for item in detail_rows),
+                sum(item["cgst"] + item["sgst"] + item["igst"] for item in detail_rows),
+            ])
+            for column in range(1, 9):
+                worksheet.cell(worksheet.max_row, column).font = Font(bold=True)
+            rc.style_header(worksheet, category_start - 1)
+
+            for row in range(2, worksheet.max_row + 1):
+                for column in range(5, 12):
+                    worksheet.cell(row, column).number_format = rc.AMOUNT_FORMAT
+            worksheet.freeze_panes = "A2"
+            finalize_workbook_layout(workbook)
+            workbook.save(draft_path)
+            rebuilt += 1
+        finally:
+            workbook.close()
+    return rebuilt
 
 
 def normalize_tax_and_duties_rows(expense_ws) -> None:
@@ -2016,6 +2355,12 @@ def run_for_month(month_dir: Path, vendor_bills: Optional[Path], data_root: Opti
         print(f"Split-cheque payments resolved     : {enrichment['split']}")
         cross_income = enrich_cross_month_income(fresh_wb, bank_index, month_dir.name, root=root)
         print(f"Cross-month income matches found   : {cross_income}")
+        if "Income from Other Sources" in fresh_wb.sheetnames:
+            removed_auto_income = remove_resolved_auto_other_income_rows(
+                fresh_wb["Income from Other Sources"], bank_ws, bank_meta
+            )
+            if removed_auto_income:
+                print(f"Resolved auto-created other-income rows removed: {removed_auto_income}")
         reverse_links = reapply_sibling_cross_month_links(
             fresh_wb, sibling_dirs, month_dir.name
         )
@@ -2026,6 +2371,14 @@ def run_for_month(month_dir: Path, vendor_bills: Optional[Path], data_root: Opti
     fresh_wb.save(fresh_path)
     fresh_wb.close()
     os.replace(fresh_path, draft_path)
+
+    month_dirs = discover_month_dirs(root)
+    consolidated_other_income = consolidate_cross_month_other_income(month_dirs)
+    if consolidated_other_income:
+        print(f"Cross-month Other Sources duplicates removed: {consolidated_other_income}")
+    quarterly_sheets = rebuild_quarterly_gst_sheets(root, month_dirs)
+    if quarterly_sheets:
+        print(f"Quarterly GST sheets rebuilt: {quarterly_sheets}")
 
     print()
     print("=" * 60)
@@ -2071,6 +2424,11 @@ def run_for_root(data_root: Path, vendor_bills: Optional[Path]) -> None:
     # when the next month's draft is loaded, so both sides retain the link.
     for month_dir in month_dirs:
         _run_cross_month_pass(month_dir, month_dirs, data_root)
+
+    consolidated_other_income = consolidate_cross_month_other_income(month_dirs)
+    print(f"Cross-month Other Sources duplicates removed: {consolidated_other_income}")
+    quarterly_sheets = rebuild_quarterly_gst_sheets(data_root, month_dirs)
+    print(f"Quarterly GST sheets rebuilt: {quarterly_sheets}")
 
 
 def _prepare_root_month(month_dir: Path, vendor_bills: Optional[Path], data_root: Path) -> None:
@@ -2143,6 +2501,12 @@ def _run_cross_month_pass(month_dir: Path, month_dirs: list[Path], data_root: Pa
     bank_index = build_cross_month_bank_index(siblings)
     enrichment = enrich_unmatched_expenses(wb, bank_index, month_dir.name, root=data_root)
     enrich_cross_month_income(wb, bank_index, month_dir.name, root=data_root)
+    if "Income from Other Sources" in wb.sheetnames:
+        removed_auto_income = remove_resolved_auto_other_income_rows(
+            wb["Income from Other Sources"], wb["Bank_Statement"], _build_bank_meta(wb["Bank_Statement"])
+        )
+        if removed_auto_income:
+            print(f"{month_dir.name}: removed {removed_auto_income} resolved auto-created other-income row(s)")
     reapply_sibling_cross_month_links(wb, siblings, month_dir.name)
     quarterly_duplicates = remove_quarterly_other_income_duplicates(wb, siblings)
     if quarterly_duplicates:
