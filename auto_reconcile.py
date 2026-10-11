@@ -327,6 +327,7 @@ def refresh_other_income_categories(other_income_ws) -> bool:
 
     manual_entry_end = summary_start - 1
     other_income_ws.delete_rows(summary_start, total_row - summary_start + 1)
+    rc.refresh_other_income_gst_calculations(other_income_ws, manual_entry_end)
     rc.add_other_income_gst_summary(other_income_ws, manual_entry_end)
 
     other_income_ws.data_validations.dataValidation = []
@@ -384,10 +385,7 @@ def migrate_other_income_schema(other_income_ws) -> bool:
         )
         if not has_data:
             continue
-        other_income_ws.cell(row, 7).value = f'=ROUND((E{row}-F{row})/(1+2*H{row}),2)'
-        other_income_ws.cell(row, 9).value = f'=ROUND(G{row}*H{row},2)'
-        other_income_ws.cell(row, 10).value = f'=ROUND(G{row}*H{row},2)'
-        other_income_ws.cell(row, 11).value = 0.0
+    rc.refresh_other_income_gst_calculations(other_income_ws, data_end)
 
     if summary_start:
         total_row = next(
@@ -655,6 +653,10 @@ def link_other_income_with_bank(other_income_ws, bank_ws, bank_meta: dict) -> in
                         bank_ws.cell(bank_row, 8).value = None
             continue
 
+        if bill_no.upper().startswith("MIMO") and not bank_ref:
+            other_income_ws.cell(r, 16).value = "PENDING"
+            continue
+
         candidates = bank_rows_by_ref.get(bank_ref, []) if bank_ref else []
         if not candidates and bank_amount > 0:
             candidates = [
@@ -676,14 +678,314 @@ def link_other_income_with_bank(other_income_ws, bank_ws, bank_meta: dict) -> in
                 bank_ws.cell(bank_row, c).fill = copy(rc.GREEN_FILL)
             linked += 1
 
-        if status in {"", "PENDING", "UNMATCHED"}:
-            other_income_ws.cell(r, 16).value = "MATCHED"
+        invoice_amount = rc.numeric_amount(other_income_ws.cell(r, 5).value)
+        partially_matched = (
+            invoice_amount > 0 and bank_amount > 0
+            and not rc.money_equal(invoice_amount, bank_amount, tolerance=1.0)
+        )
+        if income_type.casefold() == "sponsorship" and bank_amount > 0:
+            other_income_ws.cell(r, 7).value = (
+                f'=ROUND((M{r}-F{r})/(1+2*H{r}),2)'
+            )
+        if status in {"", "PENDING", "UNMATCHED", "MATCHED", "PARTIALLY MATCHED"}:
+            other_income_ws.cell(r, 16).value = (
+                "PARTIALLY MATCHED" if partially_matched else "MATCHED"
+            )
             if not bank_ref:
                 other_income_ws.cell(r, 14).value = rc.clean_string(bank_ws.cell(bank_row, 6).value)
             if not other_income_ws.cell(r, 15).value:
                 other_income_ws.cell(r, 15).value = bank_ws.cell(bank_row, bank_meta["date_col"]).value
+            if partially_matched:
+                for column in range(1, 17):
+                    other_income_ws.cell(r, column).fill = copy(rc.YELLOW_FILL)
 
     return linked
+
+
+def sync_other_income_with_recorded_income(other_income_ws, income_ws, bank_ws=None) -> int:
+    """Use matched NBH receipt IDs that exist on the bank sheet to refresh invoices."""
+    if income_ws is None:
+        return 0
+
+    income_headers = _header_map(income_ws)
+    other_headers = _header_map(other_income_ws)
+    receipt_ref_col = income_headers.get("REFERENCE NUMBER")
+    bank_ref_col = income_headers.get("BANK REFERENCE ID")
+    income_status_col = income_headers.get("BANK MATCH STATUS")
+    bill_col = other_headers.get("BILL NUMBER")
+    other_ref_col = other_headers.get("BANK REFERENCE ID")
+    other_amount_col = other_headers.get("BANK DEPOSIT AMOUNT")
+    other_date_col = other_headers.get("BANK TRANSACTION DATE")
+    if not all((receipt_ref_col, bank_ref_col, income_status_col, bill_col, other_ref_col)):
+        return 0
+
+    invoice_rows: dict[str, list[int]] = {}
+    for row in range(2, other_income_ws.max_row + 1):
+        bill_number = rc.clean_string(other_income_ws.cell(row, bill_col).value).upper()
+        if bill_number:
+            invoice_rows.setdefault(bill_number, []).append(row)
+
+    bank_reference_counts: dict[str, int] = {}
+    if bank_ws is not None:
+        for bank_row in range(2, bank_ws.max_row + 1):
+            bank_reference = rc.clean_string(bank_ws.cell(bank_row, 6).value).upper()
+            if bank_reference:
+                bank_reference_counts[bank_reference] = bank_reference_counts.get(bank_reference, 0) + 1
+
+    synced = 0
+    for row in range(2, income_ws.max_row + 1):
+        status = rc.clean_string(income_ws.cell(row, income_status_col).value).upper()
+        if not status.startswith("MATCHED"):
+            continue
+        bill_number = rc.clean_string(income_ws.cell(row, receipt_ref_col).value).upper()
+        bank_reference = rc.reference_text(income_ws.cell(row, bank_ref_col).value)
+        if bill_number.startswith("MIMO") and (
+            not bank_reference
+            or bank_ws is None
+            or bank_reference_counts.get(bank_reference.upper(), 0) != 1
+        ):
+            continue
+        targets = invoice_rows.get(bill_number, []) if bill_number and bank_reference else []
+        if len(targets) != 1:
+            continue
+
+        target_row = targets[0]
+        if rc.reference_text(other_income_ws.cell(target_row, other_ref_col).value) != bank_reference:
+            other_income_ws.cell(target_row, other_ref_col).value = bank_reference
+            other_income_ws.cell(target_row, other_ref_col).number_format = "@"
+            synced += 1
+        amount = next(
+            (
+                rc.numeric_amount(income_ws.cell(row, income_headers[name]).value)
+                for name in ("CREDIT", "DEBIT")
+                if income_headers.get(name)
+                and rc.numeric_amount(income_ws.cell(row, income_headers[name]).value) > 0
+            ),
+            0.0,
+        )
+        if amount > 0 and other_amount_col:
+            other_income_ws.cell(target_row, other_amount_col).value = amount
+        if other_date_col:
+            date_value = income_ws.cell(row, income_headers.get("BANK TRANSACTION DATE", 0)).value
+            if date_value:
+                other_income_ws.cell(target_row, other_date_col).value = date_value
+    return synced
+
+
+def _other_income_history_roots(data_root: Path) -> list[Path]:
+    """Return the active financial-year root and earlier sibling year roots."""
+    data_root = data_root.resolve()
+    roots = [data_root]
+    current_year = re.match(r"^(\d{4})[-_](\d{4})$", data_root.name)
+    if not current_year or not data_root.parent.is_dir():
+        return roots
+
+    current_start_year = int(current_year.group(1))
+    for sibling in sorted(data_root.parent.iterdir()):
+        if not sibling.is_dir() or sibling.resolve() == data_root:
+            continue
+        year_match = re.match(r"^(\d{4})[-_](\d{4})$", sibling.name)
+        if year_match and int(year_match.group(1)) < current_start_year:
+            roots.append(sibling.resolve())
+    return roots
+
+
+OTHER_INCOME_NARRATION_NOISE = {
+    "BY", "TRANSFER", "UPI", "CR", "DR", "NEFT", "IMPS", "RTGS",
+    "PAY", "PAYME", "PAYMENT", "SENT", "COLLECT", "HDFC", "SBIN",
+    "UTIB", "ICIC", "CNRB", "KKBK", "UCBA", "BARB", "UBIN", "CIUB",
+    "KARB", "IDFB", "HSBC", "YESB", "AXIS", "INDB", "PUNB", "FDRL",
+    "BKID", "BANK", "THE", "AND", "FROM",
+}
+
+
+def other_income_narration_tokens(value: Any) -> set[str]:
+    """Extract sender, UPI-handle, and phone fragments, excluding transaction references and noise."""
+    return {
+        token for token in rc.get_tokens(value)
+        if len(token) > 1
+        and (not token.isdigit() or len(token) == 10)
+        and token not in OTHER_INCOME_NARRATION_NOISE
+    }
+
+
+def build_other_income_history(data_root: Path) -> list[dict[str, Any]]:
+    """Read classified income and its bank narration from available year reports."""
+    history: list[dict[str, Any]] = []
+    for year_root in _other_income_history_roots(data_root):
+        if not year_root.is_dir():
+            continue
+        for month_dir in sorted(year_root.iterdir()):
+            if not month_dir.is_dir():
+                continue
+            try:
+                parse_month_dir_name(month_dir.name)
+                report_path = resolve_draft_path(month_dir)
+            except ValueError:
+                continue
+            if not report_path.is_file():
+                continue
+            try:
+                workbook = load_workbook(report_path, read_only=True, data_only=True)
+            except Exception:
+                continue
+            try:
+                if "Bank_Statement" not in workbook.sheetnames or "Income from Other Sources" not in workbook.sheetnames:
+                    continue
+                bank_ws = workbook["Bank_Statement"]
+                other_ws = workbook["Income from Other Sources"]
+                bank_header_row, bank_headers = rc.locate_bank_header(bank_ws)
+                narration_col = bank_headers.get("NARRATION", 2)
+                bank_last_row = rc.find_last_bank_data_row(bank_ws, bank_header_row)
+                narrations_by_ref: dict[str, list[str]] = {}
+                for bank_row in range(bank_header_row + 1, bank_last_row + 1):
+                    reference = rc.clean_string(bank_ws.cell(bank_row, 6).value).upper()
+                    narration = rc.clean_string(bank_ws.cell(bank_row, narration_col).value)
+                    if reference and narration:
+                        narrations_by_ref.setdefault(reference, []).append(narration)
+
+                other_headers = _header_map(other_ws)
+                ref_col = other_headers.get("BANK REFERENCE ID")
+                ledger_col = other_headers.get("LEDGER NAME")
+                type_col = other_headers.get("INCOME TYPE")
+                status_col = other_headers.get("MATCH STATUS")
+                if not all((ref_col, ledger_col, type_col, status_col)):
+                    continue
+                for row in range(2, other_ws.max_row + 1):
+                    status = rc.clean_string(other_ws.cell(row, status_col).value).upper()
+                    ledger = rc.clean_string(other_ws.cell(row, ledger_col).value)
+                    income_type = rc.clean_string(other_ws.cell(row, type_col).value)
+                    reference = rc.clean_string(other_ws.cell(row, ref_col).value).upper()
+                    narrations = narrations_by_ref.get(reference, [])
+                    if not status.startswith("MATCHED") or not ledger or not income_type or len(narrations) != 1:
+                        continue
+                    tokens = other_income_narration_tokens(narrations[0])
+                    if tokens:
+                        history.append({"tokens": tokens, "ledger": ledger, "income_type": income_type})
+            finally:
+                workbook.close()
+    return history
+
+
+def infer_other_income_details(
+    other_income_ws, bank_ws, bank_meta: dict, history: list[dict[str, Any]]
+) -> int:
+    """Fill missing ledger/type only when bank narration strongly matches history."""
+    if not history:
+        return 0
+
+    header_row = bank_meta["header_row"]
+    last_row = rc.find_last_bank_data_row(bank_ws, header_row)
+    bank_rows_by_ref: dict[str, list[int]] = {}
+    for bank_row in range(header_row + 1, last_row + 1):
+        reference = rc.clean_string(bank_ws.cell(bank_row, 6).value).upper()
+        if reference:
+            bank_rows_by_ref.setdefault(reference, []).append(bank_row)
+
+    inferred = 0
+    for row in range(2, other_income_ws.max_row + 1):
+        ledger = rc.clean_string(other_income_ws.cell(row, 2).value)
+        income_type = rc.clean_string(other_income_ws.cell(row, 12).value)
+        if ledger and income_type:
+            continue
+        reference = rc.clean_string(other_income_ws.cell(row, 14).value).upper()
+        bank_rows = bank_rows_by_ref.get(reference, []) if reference else []
+        if not bank_rows:
+            amount = rc.numeric_amount(other_income_ws.cell(row, 13).value)
+            if amount > 0:
+                bank_rows = [
+                    bank_row for bank_row in range(header_row + 1, last_row + 1)
+                    if rc.money_equal(
+                        rc.numeric_amount(bank_ws.cell(bank_row, bank_meta["credit_col"]).value), amount
+                    )
+                ]
+        if len(bank_rows) != 1:
+            continue
+
+        narration = rc.clean_string(bank_ws.cell(bank_rows[0], bank_meta["narration_col"]).value)
+        tokens = other_income_narration_tokens(narration)
+        if not tokens:
+            continue
+
+        relevant_history = []
+        for entry in history:
+            if ledger and rc.normalize_text(entry["ledger"]) != rc.normalize_text(ledger):
+                continue
+            provisional_others = income_type.casefold() == "others" and not ledger
+            if income_type and not provisional_others and entry["income_type"].casefold() != income_type.casefold():
+                continue
+            overlap = tokens.intersection(entry["tokens"])
+            if overlap:
+                relevant_history.append((entry, overlap))
+
+        pair_scores: dict[str, int] = {}
+        token_type_counts: dict[str, dict[str, int]] = {}
+        for entry, overlap in relevant_history:
+            if len(overlap) >= 2:
+                pair_scores[entry["income_type"]] = max(
+                    pair_scores.get(entry["income_type"], 0), len(overlap)
+                )
+            for token in overlap:
+                counts = token_type_counts.setdefault(token, {})
+                counts[entry["income_type"]] = counts.get(entry["income_type"], 0) + 1
+
+        classification_scores: dict[str, int] = {
+            category_name: overlap_count * 10
+            for category_name, overlap_count in pair_scores.items()
+        }
+        for token_counts in token_type_counts.values():
+            if len(token_counts) != 1:
+                continue
+            category_name, occurrences = next(iter(token_counts.items()))
+            if occurrences >= 2:
+                classification_scores[category_name] = (
+                    classification_scores.get(category_name, 0) + min(occurrences, 5)
+                )
+
+        ranked_types = sorted(classification_scores.items(), key=lambda item: item[1], reverse=True)
+        if not ranked_types or (
+            len(ranked_types) > 1 and ranked_types[0][1] == ranked_types[1][1]
+        ):
+            continue
+
+        matched_type = ranked_types[0][0]
+        ledger_support: dict[str, tuple[str, int, int]] = {}
+        pair_history = [
+            (entry, overlap) for entry, overlap in relevant_history
+            if entry["income_type"] == matched_type and len(overlap) >= 2
+        ]
+        ledger_history = pair_history or [
+            (entry, overlap) for entry, overlap in relevant_history
+            if entry["income_type"] == matched_type
+        ]
+        for entry, overlap in ledger_history:
+            normalized_ledger = rc.normalize_text(entry["ledger"])
+            if not normalized_ledger:
+                continue
+            original, occurrences, overlap_total = ledger_support.get(
+                normalized_ledger, (entry["ledger"], 0, 0)
+            )
+            ledger_support[normalized_ledger] = (
+                original, occurrences + 1, overlap_total + len(overlap)
+            )
+        ranked_ledgers = sorted(
+            ledger_support.values(), key=lambda item: (item[1], item[2]), reverse=True
+        )
+        ledger_inferred = False
+        if not ledger and ranked_ledgers and (
+            len(ranked_ledgers) == 1
+            or (ranked_ledgers[0][1], ranked_ledgers[0][2])
+            > (ranked_ledgers[1][1], ranked_ledgers[1][2])
+        ):
+            other_income_ws.cell(row, 2).value = ranked_ledgers[0][0]
+            ledger_inferred = True
+        type_inferred = False
+        if not income_type or (income_type.casefold() == "others" and not ledger):
+            other_income_ws.cell(row, 12).value = matched_type
+            type_inferred = True
+        if ledger_inferred or type_inferred:
+            inferred += 1
+    return inferred
 
 
 def remove_resolved_auto_other_income_rows(other_income_ws, bank_ws, bank_meta: dict) -> int:
@@ -1031,9 +1333,19 @@ def merge_draft(old_wb, new_wb) -> None:
         for row in range(2, new_ws.max_row + 1):
             old_row = old_index.get(_row_key(new_ws, row, [1]))
             if old_row is not None:
-                merged += _copy_columns(old_ws, old_row, new_ws, row, [2, 12, 14, 17])
-                if rc.clean_string(new_ws.cell(row, 12).value).upper() == "SPONSORSHIP":
-                    new_ws.cell(row, 12).value = "Screen Rentals"
+                merged += _copy_columns(old_ws, old_row, new_ws, row, [2, 12, 17])
+                old_reference = old_ws.cell(old_row, 14).value
+                new_reference = new_ws.cell(row, 14).value
+                if new_reference in (None, "") and old_reference not in (None, ""):
+                    new_ws.cell(row, 14).value = old_reference
+                    merged += 1
+                classified_type = rc.classify_other_income_invoice(
+                    new_ws.cell(row, 1).value,
+                    new_ws.cell(row, 2).value,
+                    new_ws.cell(row, 5).value,
+                )
+                if classified_type:
+                    new_ws.cell(row, 12).value = classified_type
         print(f"Income from Other Sources: preserved {merged} values/identifier(s), removed {removed} merged duplicate row(s)")
 
     if "FD Transactions" in old_wb.sheetnames and "FD Transactions" in new_wb.sheetnames:
@@ -1715,10 +2027,11 @@ def consolidate_cross_month_other_income(month_dirs: list[Path]) -> int:
                 removed += 1
 
         for _, _, workbook in workbooks:
-            if id(workbook) not in affected_workbooks:
+            if "Income from Other Sources" not in workbook.sheetnames:
                 continue
             worksheet = workbook["Income from Other Sources"]
             refresh_other_income_categories(worksheet)
+            affected_workbooks.add(id(workbook))
 
         for _, draft_path, workbook in workbooks:
             if id(workbook) in affected_workbooks:
@@ -2292,6 +2605,20 @@ def run_for_month(month_dir: Path, vendor_bills: Optional[Path], data_root: Opti
         refreshed = refresh_other_income_categories(fresh_wb["Income from Other Sources"])
         if refreshed:
             print("Income from Other Sources: refreshed category options and GST summary")
+        synced_income_refs = sync_other_income_with_recorded_income(
+            fresh_wb["Income from Other Sources"],
+            fresh_wb["Income_recorded_in_nbh"]
+            if "Income_recorded_in_nbh" in fresh_wb.sheetnames else None,
+            bank_ws,
+        )
+        if synced_income_refs:
+            print(f"Other Income references refreshed from NBH receipts: {synced_income_refs}")
+        history = build_other_income_history(root)
+        inferred = infer_other_income_details(
+            fresh_wb["Income from Other Sources"], bank_ws, bank_meta, history
+        )
+        if inferred:
+            print(f"Other Income classifications inferred from history: {inferred}")
         other_income_links = link_other_income_with_bank(fresh_wb["Income from Other Sources"], bank_ws, bank_meta)
     print(f"Other Income entries linked to Bank Statement: {other_income_links}")
 
@@ -2308,6 +2635,17 @@ def run_for_month(month_dir: Path, vendor_bills: Optional[Path], data_root: Opti
             fresh_wb["Income_recorded_in_nbh"], bank_ws, bank_meta
         )
     print(f"NBH income entries linked by Bank Reference ID: {recorded_income_links}")
+    if "Income from Other Sources" in fresh_wb.sheetnames and "Income_recorded_in_nbh" in fresh_wb.sheetnames:
+        synced_income_refs = sync_other_income_with_recorded_income(
+            fresh_wb["Income from Other Sources"],
+            fresh_wb["Income_recorded_in_nbh"],
+            bank_ws,
+        )
+        if synced_income_refs:
+            print(f"Other Income references refreshed after NBH matching: {synced_income_refs}")
+            other_income_links += link_other_income_with_bank(
+                fresh_wb["Income from Other Sources"], bank_ws, bank_meta
+            )
 
     cash_withdrawal_links = link_cash_withdrawals_with_bank(fresh_wb, bank_ws, bank_meta)
     print(f"Cash withdrawal registers linked to Bank Statement: {cash_withdrawal_links}")
@@ -2366,6 +2704,9 @@ def run_for_month(month_dir: Path, vendor_bills: Optional[Path], data_root: Opti
         )
         print(f"Reverse cross-month bank links restored: {reverse_links}")
 
+    if "Income from Other Sources" in fresh_wb.sheetnames:
+        refresh_other_income_categories(fresh_wb["Income from Other Sources"])
+
     finalize_workbook_layout(fresh_wb)
     fresh_wb.active = fresh_wb.sheetnames.index("Bank_Statement")
     fresh_wb.save(fresh_path)
@@ -2410,6 +2751,10 @@ def run_for_root(data_root: Path, vendor_bills: Optional[Path]) -> None:
     month_dirs = discover_month_dirs(data_root.resolve())
     print(f"Found {len(month_dirs)} month director{'y' if len(month_dirs) == 1 else 'ies'} under {data_root.resolve()}")
 
+    # Snapshot matched historical classifications before preparation rebuilds
+    # reports and resets their other-income statuses for this run.
+    other_income_history = build_other_income_history(data_root.resolve())
+
     # Phase 1 and 2: every month gets a fresh workbook, then every existing
     # draft is merged before any current-month or cross-month matching starts.
     for month_dir in month_dirs:
@@ -2417,7 +2762,7 @@ def run_for_root(data_root: Path, vendor_bills: Optional[Path]) -> None:
 
     # Phase 3: reconcile each month only against its own bank sheet.
     for month_dir in month_dirs:
-        _run_current_month_pass(month_dir)
+        _run_current_month_pass(month_dir, other_income_history)
 
     # Phase 4 and 5: reload each completed current-month draft, apply
     # cross-month links, and save it. Sibling annotations are already on disk
@@ -2455,7 +2800,9 @@ def _prepare_root_month(month_dir: Path, vendor_bills: Optional[Path], data_root
         fresh_path.unlink()
 
 
-def _run_current_month_pass(month_dir: Path) -> None:
+def _run_current_month_pass(
+    month_dir: Path, other_income_history: Optional[list[dict[str, Any]]] = None
+) -> None:
     draft_path = resolve_draft_path(month_dir)
     wb = load_workbook(draft_path)
     bank_ws = wb["Bank_Statement"]
@@ -2466,11 +2813,30 @@ def _run_current_month_pass(month_dir: Path) -> None:
     if "Income from Other Sources" in wb.sheetnames:
         migrate_other_income_schema(wb["Income from Other Sources"])
         refresh_other_income_categories(wb["Income from Other Sources"])
+        synced_income_refs = 0
+        if "Income_recorded_in_nbh" in wb.sheetnames:
+            synced_income_refs = sync_other_income_with_recorded_income(
+                wb["Income from Other Sources"], wb["Income_recorded_in_nbh"], bank_ws
+            )
+        if synced_income_refs:
+            print(f"{month_dir.name}: Other Sources references refreshed from NBH: {synced_income_refs}")
+        inferred = infer_other_income_details(
+            wb["Income from Other Sources"], bank_ws, bank_meta, other_income_history or []
+        )
+        if inferred:
+            print(f"{month_dir.name}: other-income classifications inferred from history: {inferred}")
         link_other_income_with_bank(wb["Income from Other Sources"], bank_ws, bank_meta)
     if "Expense" in wb.sheetnames:
         link_expense_references_with_bank(wb["Expense"], bank_ws, bank_meta)
     if "Income_recorded_in_nbh" in wb.sheetnames:
         link_recorded_income_with_bank(wb["Income_recorded_in_nbh"], bank_ws, bank_meta)
+        if "Income from Other Sources" in wb.sheetnames:
+            synced_income_refs = sync_other_income_with_recorded_income(
+                wb["Income from Other Sources"], wb["Income_recorded_in_nbh"], bank_ws
+            )
+            if synced_income_refs:
+                print(f"{month_dir.name}: Other Sources references refreshed after NBH matching: {synced_income_refs}")
+                link_other_income_with_bank(wb["Income from Other Sources"], bank_ws, bank_meta)
     link_cash_withdrawals_with_bank(wb, bank_ws, bank_meta)
     reapply_match_highlighting(bank_ws, bank_meta["header_row"])
     if "Expense" in wb.sheetnames:
@@ -2511,6 +2877,8 @@ def _run_cross_month_pass(month_dir: Path, month_dirs: list[Path], data_root: Pa
     quarterly_duplicates = remove_quarterly_other_income_duplicates(wb, siblings)
     if quarterly_duplicates:
         print(f"{month_dir.name}: removed {quarterly_duplicates} quarterly Other Sources duplicate(s)")
+    if "Income from Other Sources" in wb.sheetnames:
+        refresh_other_income_categories(wb["Income from Other Sources"])
     finalize_workbook_layout(wb)
     wb.active = wb.sheetnames.index("Bank_Statement")
     wb.save(draft_path)

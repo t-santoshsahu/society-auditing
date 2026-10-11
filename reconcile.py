@@ -70,6 +70,9 @@ GST_AMOUNT_FORMAT = '0.00'
 OTHER_INCOME_TYPES = (
     "MoveInMoveOut",
     "Classes",
+    "Sponsorship",
+    "Adonmo Digital ads",
+    "NBH digital ads",
     "Screen Rentals",
     "Amenities Rentals",
     "Services",
@@ -331,11 +334,6 @@ def generate_reference_id(
     if match:
         return match.group(1)
 
-    # ICICI cheque credit narrations use the branch reference after "ICI PrBr".
-    match = re.search(r'\bICI\s+PRBR\s+(\d{4,})\b', upper)
-    if match:
-        return match.group(1)
-
     # Cheque patterns
     cheque_patterns = [
         r'\bCHQ[-\s]*(\d{4,})\b',
@@ -349,6 +347,11 @@ def generate_reference_id(
         match = re.search(pattern, upper)
         if match:
             return match.group(1)
+
+    # Use the ICICI branch reference only when no explicit cheque number exists.
+    match = re.search(r'\bICI\s+PRBR\s+(\d{4,})\b', upper)
+    if match:
+        return match.group(1)
 
     # Fixed Deposit transfer
     match = re.search(r'\bTO\s+FD[-\s]*(\d+)', upper)
@@ -731,6 +734,51 @@ def add_other_income_gst_summary(other_income_ws, data_end: int) -> None:
 
     style_header(other_income_ws, summary_start)
     other_income_ws.cell(total_row, 1).font = Font(bold=True)
+
+
+def refresh_other_income_gst_calculations(other_income_ws, data_end: int) -> None:
+    """Rebuild formulas only for calculated deposits and receipt-based sponsorship."""
+    for row in range(2, data_end + 1):
+        bill_number = clean_string(other_income_ws.cell(row, 1).value).upper()
+        voucher_type = clean_string(other_income_ws.cell(row, 4).value).upper()
+        income_type = clean_string(other_income_ws.cell(row, 12).value).casefold()
+        bank_amount = numeric_amount(other_income_ws.cell(row, 13).value)
+        is_generated_deposit = bool(re.fullmatch(r"[A-F0-9]{16}", bill_number))
+        if income_type == "sponsorship" and bank_amount > 0:
+            amount_ref = f"M{row}"
+        elif voucher_type == "BANK RECEIPT" or is_generated_deposit:
+            amount_ref = f"E{row}"
+        else:
+            continue
+
+        other_income_ws.cell(row, 7).value = (
+            f'=ROUND(({amount_ref}-F{row})/(1+2*H{row}),2)'
+        )
+        other_income_ws.cell(row, 9).value = f"=ROUND(G{row}*H{row},2)"
+        other_income_ws.cell(row, 10).value = f"=ROUND(G{row}*H{row},2)"
+        other_income_ws.cell(row, 11).value = 0.0
+
+
+def classify_other_income_invoice(
+    bill_number: Any, ledger_name: Any, total_amount: Any = None
+) -> Optional[str]:
+    """Classify invoice types with explicit bill-number and ledger conventions."""
+    bill = clean_string(bill_number).upper()
+    ledger = clean_string(ledger_name).upper()
+    if bill.startswith("MIMO"):
+        return "MoveInMoveOut"
+    if "ADONMO" in ledger:
+        return "Adonmo Digital ads"
+    if "NBH" in ledger and "DIGITAL" in ledger and ("AD" in ledger or "ADD" in ledger):
+        return "NBH digital ads"
+    if bill.startswith("SPONSOR/") or "SPONSORSHIP" in ledger:
+        return "Sponsorship"
+    amount = numeric_amount(total_amount)
+    if bill.startswith("BKG/") and amount >= 3500:
+        return "Clubhouse Booking"
+    if bill.startswith("BKG/") and 0 < amount < 2000:
+        return "Amenities Booking"
+    return None
 
 
 def apply_expense_calculations(expense_ws) -> None:
@@ -1386,19 +1434,11 @@ def process_other_income_sources(gst_invoice_ws, bank_ws, output_wb, bank_meta: 
         # reset to zero below when their year/quarter/number reference is known.
         other_income_ws.cell(out_row, 8).value = 0.09
 
-        # Automatically classify Move In/Move Out invoices.
-        if bill_no.upper().startswith("MIMO"):
-            other_income_ws.cell(out_row, 12).value = "MoveInMoveOut"
-        elif bill_no.upper().startswith("SPONSOR/"):
-            other_income_ws.cell(out_row, 12).value = "Screen Rentals"
-        else:
-            other_income_ws.cell(out_row, 12).value = None
-
-        # Keep all GST values formula-driven from amount and percentage.
-        other_income_ws.cell(out_row, 7).value = f'=ROUND((E{out_row}-F{out_row})/(1+2*H{out_row}),2)'
-        other_income_ws.cell(out_row, 9).value = f'=ROUND(G{out_row}*H{out_row},2)'
-        other_income_ws.cell(out_row, 10).value = f'=ROUND(G{out_row}*H{out_row},2)'
-        other_income_ws.cell(out_row, 11).value = 0.0
+        # Automatically classify known invoice categories.
+        other_income_ws.cell(out_row, 12).value = classify_other_income_invoice(
+            bill_no, other_income_ws.cell(out_row, 2).value,
+            other_income_ws.cell(out_row, 5).value,
+        ) or "Others"
 
         # Add Bank Deposit Amount, Reference, Date, Match Status (empty for manual entry)
         other_income_ws.cell(out_row, 13).value = None  # Bank Deposit Amount
@@ -1440,14 +1480,23 @@ def process_other_income_sources(gst_invoice_ws, bank_ws, output_wb, bank_meta: 
             invoice_row = invoice_rows.get(receipt_reference.upper()) if receipt_reference else None
             if invoice_row:
                 other_income_ws.cell(invoice_row, 13).value = receipt_amount
-                other_income_ws.cell(invoice_row, 14).value = bank_reference
-                other_income_ws.cell(invoice_row, 14).number_format = "@"
                 other_income_ws.cell(invoice_row, 15).value = income_ws.cell(row, income_ws.max_column - 1).value
+                is_move_in_invoice = receipt_reference.upper().startswith("MIMO")
+                if not is_move_in_invoice:
+                    other_income_ws.cell(invoice_row, 14).value = bank_reference
+                    other_income_ws.cell(invoice_row, 14).number_format = "@"
+                else:
+                    other_income_ws.cell(invoice_row, 16).value = "PENDING"
+                if clean_string(other_income_ws.cell(invoice_row, 12).value).casefold() == "sponsorship":
+                    other_income_ws.cell(invoice_row, 7).value = (
+                        f'=ROUND((M{invoice_row}-F{invoice_row})/(1+2*H{invoice_row}),2)'
+                    )
                 if maintenance_reference.fullmatch(receipt_reference):
                     other_income_ws.cell(invoice_row, 8).value = 0.0
                 else:
                     other_income_ws.cell(invoice_row, 8).value = 0.09
-                existing_references.add(bank_reference.upper())
+                if not is_move_in_invoice:
+                    existing_references.add(bank_reference.upper())
                 continue
             if (receipt_reference and maintenance_reference.fullmatch(receipt_reference)) or bank_reference.upper() in existing_references:
                 continue
@@ -1475,7 +1524,7 @@ def process_other_income_sources(gst_invoice_ws, bank_ws, output_wb, bank_meta: 
             other_income_ws.cell(out_row, 9).value = f'=ROUND(G{out_row}*H{out_row},2)'
             other_income_ws.cell(out_row, 10).value = f'=ROUND(G{out_row}*H{out_row},2)'
             other_income_ws.cell(out_row, 11).value = 0.0
-            other_income_ws.cell(out_row, 12).value = income_type
+            other_income_ws.cell(out_row, 12).value = income_type or "Others"
             other_income_ws.cell(out_row, 13).value = receipt_amount
             other_income_ws.cell(out_row, 14).value = bank_reference
             other_income_ws.cell(out_row, 14).number_format = "@"
@@ -1522,8 +1571,8 @@ def process_other_income_sources(gst_invoice_ws, bank_ws, output_wb, bank_meta: 
         other_income_ws.cell(out_row, 11).value = 0.0
         other_income_ws.cell(out_row, 11).number_format = AMOUNT_FORMAT
 
-        # Income Type (Column 16) - To be filled manually
-        other_income_ws.cell(out_row, 12).value = None
+        # Keep unclassified deposits in the catch-all GST summary bucket.
+        other_income_ws.cell(out_row, 12).value = "Others"
 
         # Bank Deposit Amount (Column 17)
         other_income_ws.cell(out_row, 13).value = bank_amount
@@ -1571,6 +1620,7 @@ def process_other_income_sources(gst_invoice_ws, bank_ws, output_wb, bank_meta: 
     )
     other_income_ws.add_data_validation(income_type_validation)
     income_type_validation.add(f"L2:L{manual_entry_end}")
+    refresh_other_income_gst_calculations(other_income_ws, manual_entry_end)
     add_other_income_gst_summary(other_income_ws, manual_entry_end)
 
     style_header(other_income_ws, 1)

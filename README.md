@@ -144,6 +144,14 @@ The report initially copies `SETTLEMENT ID` into `BANK REFERENCE ID`. If a user 
 
 Existing GST income rows are combined with unmatched bank deposits. Automatically added deposit rows start as `PENDING` until the user supplies identifying details.
 
+The `Income Type` list includes `Sponsorship`, `Adonmo Digital ads`, and `NBH digital ads`; all appear in the GST-by-income-type summary. `SPONSOR/` invoices default to `Sponsorship`, ledgers containing `ADONMO` default to `Adonmo Digital ads`, and ledgers containing `NBH` plus `DIGITAL AD` default to `NBH digital ads`.
+
+GST amounts supplied on invoice rows are retained from the GST report. Generated bank-deposit rows calculate taxable amount and GST from the received amount; Sponsorship rows with receipts use the receipt amount as their GST basis. Rows without a more specific income type are assigned to `Others` so they remain included in the GST-by-type summary.
+
+For MIMO invoices, a matched NBH receipt automatically supplies its generated reference to `Income from Other Sources` when that reference exists uniquely in the bank sheet. If NBH cannot resolve the receipt to a bank reference, the MIMO row remains `PENDING`; enter the generated bank reference manually, and it will be preserved across reruns.
+
+Before manual review, the orchestrator compares an unclassified deposit's bank narration with previously matched `Income from Other Sources` entries in available reports from the current and earlier financial years. It ignores changing UPI transaction numbers and generic bank/payment terms, then looks for repeated sender names or UPI-handle fragments. A distinctive multi-fragment match, or a sender fragment repeated only under one historical income type, can infer the category; the ledger is copied only when its historical match is unambiguous. New or conflicting sender patterns remain unclassified. Classification and reconciliation are separate: the existing linker still needs one bank row identified by reference, or by a unique amount when the reference does not resolve, before it marks the income row `MATCHED`.
+
 To match an other-income row:
 
 1. Enter or confirm the income ledger/description.

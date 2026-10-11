@@ -88,7 +88,7 @@ The reconciliation will generate the following sheets in the output file:
    - FD Broken transactions when proceeds return to the bank account
    - Bank reference, narration, debit investment, credit proceeds, and tracking status
 
-6. **Income from Other Sources** - Classes, Amenity Booking, Move-In/Out, Screen Rentals:
+6. **Income from Other Sources** - Classes, Amenity Booking, Move-In/Out, Screen Rentals, Sponsorship, Adonmo Digital ads, NBH digital ads:
    - GST invoice entries (from NBH_GST_Invoice.xlsx)
    - Unmatched bank deposits automatically added with PENDING status
    - **Columns include:**
@@ -96,7 +96,7 @@ The reconciliation will generate the following sheets in the output file:
      - TYPE, UTILITY, Voucher Type
      - Total Amount, Non Taxable Amount, Taxable Amount
      - Percentage (GST %), CGST, SGST, IGST
-   - **Income Type** (MoveInMoveOut / Classes / Sponsorship / Amenities Rentals / Services / Fund / Clubhouse Booking / Amenities Booking / EV / RFID / Others) - Manual entry
+   - **Income Type** (MoveInMoveOut / Classes / Sponsorship / Adonmo Digital ads / NBH digital ads / Screen Rentals / Amenities Rentals / Services / Fund / Clubhouse Booking / Amenities Booking / EV / RFID / Others) - Selectable income type, with per-type GST summary
      - **Bank Deposit Amount** (populated from unmatched bank transactions)
      - **Bank Reference ID** (populated from bank statement)
      - **Bank Transaction Date** (populated from bank statement)

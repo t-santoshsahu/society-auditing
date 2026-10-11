@@ -7,6 +7,9 @@ A new **"Income from Other Sources"** sheet has been added to the reconciliation
 - Amenity Booking
 - Move In/Out
 - Screen Rentals
+- Sponsorship
+- Adonmo Digital ads
+- NBH digital ads
 
 This sheet processes GST invoices and automatically reconciles unmatched bank deposits with automatic GST calculations.
 
@@ -48,7 +51,9 @@ This sheet processes GST invoices and automatically reconciles unmatched bank de
 
 ### 4. **Manual Income Type Entry**
 - Provides "Income Type" column for later classification
-- Allowed values: MoveInMoveOut, Classes, Sponsorship, Amenities Rentals, Services, Fund, Clubhouse Booking, Amenities Booking, EV, RFID, Others
+- Allowed values: MoveInMoveOut, Classes, Sponsorship, Adonmo Digital ads, NBH digital ads, Screen Rentals, Amenities Rentals, Services, Fund, Clubhouse Booking, Amenities Booking, EV, RFID, Others
+- `SPONSOR/` invoice numbers default to `Sponsorship`; an `ADONMO` ledger defaults to `Adonmo Digital ads`; an `NBH` + `DIGITAL AD` ledger defaults to `NBH digital ads`.
+- Both categories are included in the GST-by-income-type summary.
 - Supports free-form text entry for flexibility
 
 ### 5. **Bank Reconciliation Data**
