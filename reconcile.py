@@ -523,7 +523,8 @@ def is_real_expense_row(ws, row: int) -> bool:
     return max(amount, total, amount_paid) > 0
 
 
-def create_expense_sheet(output_wb, vendor_ws, bank_ws, bank_meta: dict) -> tuple[Any, int, int]:
+def create_expense_sheet(output_wb, vendor_ws, bank_ws, bank_meta: dict,
+                         vendor_values_ws=None) -> tuple[Any, int, int]:
     if "Expense" in output_wb.sheetnames:
         del output_wb["Expense"]
 
@@ -565,6 +566,14 @@ def create_expense_sheet(output_wb, vendor_ws, bank_ws, bank_meta: dict) -> tupl
     copied_rows = 0
     skipped_rows = 0
 
+    def copy_vendor_row(source_row: int, target_row: int) -> None:
+        for col in range(1, 16):
+            copy_cell(vendor_ws.cell(source_row, col), expense_ws.cell(target_row, col))
+        if vendor_values_ws is not None:
+            expense_ws.cell(target_row, VENDOR_COL_LESS_EXCESS).value = vendor_values_ws.cell(
+                source_row, VENDOR_COL_LESS_EXCESS
+            ).value
+
     for source_row in range(VENDOR_START_ROW, vendor_ws.max_row + 1):
         name = clean_string(vendor_ws.cell(source_row, VENDOR_COL_NAME).value)
         upper_name = name.upper()
@@ -576,8 +585,7 @@ def create_expense_sheet(output_wb, vendor_ws, bank_ws, bank_meta: dict) -> tupl
             continue
 
         if "VICTOR" in upper_name and "MANOHAR" in upper_name and "SALARY" in upper_name:
-            for col in range(1, 16):
-                copy_cell(vendor_ws.cell(source_row, col), expense_ws.cell(output_row, col))
+            copy_vendor_row(source_row, output_row)
             expense_ws.cell(output_row, VENDOR_COL_NAME).value = "Staff Salary - Manohar"
             expense_ws.cell(output_row, VENDOR_COL_BILL_NO).value = "Staff Salary"
             expense_ws.cell(output_row, VENDOR_COL_AMOUNT).value = manohar_debit
@@ -586,8 +594,7 @@ def create_expense_sheet(output_wb, vendor_ws, bank_ws, bank_meta: dict) -> tupl
             output_row += 1
             copied_rows += 1
 
-            for col in range(1, 16):
-                copy_cell(vendor_ws.cell(source_row, col), expense_ws.cell(output_row, col))
+            copy_vendor_row(source_row, output_row)
             expense_ws.cell(output_row, VENDOR_COL_NAME).value = "Staff Salary - Victor"
             expense_ws.cell(output_row, VENDOR_COL_BILL_NO).value = "Staff Salary"
             expense_ws.cell(output_row, VENDOR_COL_AMOUNT).value = victor_debit
@@ -596,8 +603,7 @@ def create_expense_sheet(output_wb, vendor_ws, bank_ws, bank_meta: dict) -> tupl
             output_row += 1
             copied_rows += 1
         else:
-            for col in range(1, 16):
-                copy_cell(vendor_ws.cell(source_row, col), expense_ws.cell(output_row, col))
+            copy_vendor_row(source_row, output_row)
             if not clean_string(expense_ws.cell(output_row, VENDOR_COL_BILL_NO).value):
                 amount_paid = numeric_amount(expense_ws.cell(output_row, VENDOR_COL_AMOUNT_PAID).value)
                 amount = amount_paid or numeric_amount(expense_ws.cell(output_row, VENDOR_COL_TOTAL).value)
@@ -652,7 +658,7 @@ def create_expense_sheet(output_wb, vendor_ws, bank_ws, bank_meta: dict) -> tupl
         output_row += 1
         copied_rows += 1
 
-    amount_cols = [6, 7, 8, 9, 12, 14]
+    amount_cols = [6, 7, 8, 9, 12]
     for row in range(2, expense_ws.max_row + 1):
         for col in amount_cols:
             cell = expense_ws.cell(row, col)
@@ -881,6 +887,52 @@ def create_fd_transactions_sheet(bank_ws, output_wb, bank_meta: dict) -> tuple[A
     style_header(fd_ws, 1)
     fd_ws.freeze_panes = "A2"
     return fd_ws, output_row - 2, interest_count, interest_total
+
+
+def create_reimbursement_sheet(bank_ws, output_wb, bank_meta: dict) -> int:
+    """Track direct cheque transfers separately from vendor expenses."""
+    sheet_name = "Reimbursement"
+    if sheet_name in output_wb.sheetnames:
+        del output_wb[sheet_name]
+    reimbursement_ws = output_wb.create_sheet(sheet_name)
+    headers = [
+        "Transaction Date", "Narration", "Cheque/Settlement Ref",
+        "Generated Reference ID", "Debit / Transfer Amount", "Bank Match Status", "Remark",
+    ]
+    for col, header in enumerate(headers, 1):
+        reimbursement_ws.cell(1, col).value = header
+
+    patterns = ("CHEQUE WDL-TRF", "CHEQUE WDL-CHEQUE TRANSFER TO")
+    output_row = 2
+    header_row = bank_meta["header_row"]
+    last_row = find_last_bank_data_row(bank_ws, header_row)
+    for row in range(header_row + 1, last_row + 1):
+        narration = clean_string(bank_ws.cell(row, bank_meta["narration_col"]).value)
+        if not narration.upper().startswith(patterns):
+            continue
+        status = clean_string(bank_ws.cell(row, 9).value).upper()
+        if status not in {"", "UNMATCHED"}:
+            continue
+        amount = numeric_amount(bank_ws.cell(row, bank_meta["debit_col"]).value)
+        if amount <= 0:
+            continue
+
+        generated_reference = clean_string(bank_ws.cell(row, 6).value)
+        original_reference = bank_ws.cell(row, bank_meta["ref_col"]).value
+        reimbursement_ws.cell(output_row, 1).value = bank_ws.cell(row, bank_meta["date_col"]).value
+        reimbursement_ws.cell(output_row, 1).number_format = "dd-mmm-yyyy"
+        reimbursement_ws.cell(output_row, 2).value = narration
+        reimbursement_ws.cell(output_row, 3).value = original_reference
+        reimbursement_ws.cell(output_row, 4).value = generated_reference
+        reimbursement_ws.cell(output_row, 5).value = amount
+        reimbursement_ws.cell(output_row, 5).number_format = AMOUNT_FORMAT
+        reimbursement_ws.cell(output_row, 6).value = "PENDING"
+        output_row += 1
+
+    style_header(reimbursement_ws, 1)
+    reimbursement_ws.freeze_panes = "A2"
+    autofit(reimbursement_ws)
+    return output_row - 2
 
 
 def create_cash_withdrawal_sheets(bank_ws, output_wb, bank_meta: dict) -> int:
@@ -1142,6 +1194,7 @@ def match_bank_and_expense(bank_ws, expense_ws, bank_meta: dict) -> dict:
         amount_paid = numeric_amount(expense_ws.cell(r, VENDOR_COL_AMOUNT_PAID).value)
         total = numeric_amount(expense_ws.cell(r, VENDOR_COL_TOTAL).value)
         amount = numeric_amount(expense_ws.cell(r, VENDOR_COL_AMOUNT).value)
+        less_excess = numeric_amount(expense_ws.cell(r, VENDOR_COL_LESS_EXCESS).value)
 
         final_amount = amount_paid if amount_paid > 0 else (total if total > 0 else amount)
         if final_amount > 0:
@@ -1151,6 +1204,7 @@ def match_bank_and_expense(bank_ws, expense_ws, bank_meta: dict) -> dict:
                 "vendor": vendor,
                 "payment_ref": clean_string(expense_ws.cell(r, 16).value).upper(),
                 "amount": final_amount,
+                "less_excess": abs(less_excess),
             })
 
     matched_expenses = set()
@@ -1191,7 +1245,9 @@ def match_bank_and_expense(bank_ws, expense_ws, bank_meta: dict) -> dict:
             match_idx = reference_candidates[0]
             expected = expenses[match_idx]["amount"]
             difference = round(debit - expected, 2)
-            status = "MATCHED" if abs(difference) <= 1 else f"PARTIALLY MATCHED (Difference: {difference:,.2f})"
+            less_excess = expenses[match_idx].get("less_excess", 0)
+            is_explicit_less_excess_match = money_equal(abs(difference), less_excess, tolerance=1)
+            status = "MATCHED" if abs(difference) <= 1 or is_explicit_less_excess_match else f"PARTIALLY MATCHED (Difference: {difference:,.2f})"
             if status.startswith("PARTIALLY"):
                 expense_row = expenses[match_idx]["row"]
                 bank_ws.cell(row, 8).value = status
@@ -1207,7 +1263,10 @@ def match_bank_and_expense(bank_ws, expense_ws, bank_meta: dict) -> dict:
 
         candidates = [
             i for i, exp in enumerate(expenses)
-            if i not in matched_expenses and abs(exp["amount"] - debit) <= 1
+            if i not in matched_expenses and (
+                abs(exp["amount"] - debit) <= 1 or
+                money_equal(abs(exp["amount"] - debit), exp.get("less_excess", 0), tolerance=1)
+            )
         ]
         match_idx = candidates[0] if len(candidates) == 1 else None
         status = "MATCHED" if match_idx is not None else ("REVIEW" if len(candidates) > 1 else "UNMATCHED")
@@ -1661,6 +1720,7 @@ def run_reconciliation(
 
     bank_wb = load_input_workbook(bank_path)
     vendor_wb = load_input_workbook(vendor_path, data_only=False)
+    vendor_values_wb = load_input_workbook(vendor_path, data_only=True)
 
     bank_ws = bank_wb.worksheets[0]
     bank_ws.title = "Bank_Statement"
@@ -1715,6 +1775,7 @@ def run_reconciliation(
         raise ValueError(
             f"Could not find vendor sheet for {target_month_str}. Available sheets: {available}"
         )
+    vendor_values_ws = find_vendor_sheet(vendor_values_wb, exp_year, exp_month)
 
     print(f"Vendor sheet selected: {vendor_ws.title}")
 
@@ -1726,7 +1787,9 @@ def run_reconciliation(
     print(f"FD transactions tracked     : {fd_transaction_count}")
 
     # 3. Build Sanitized Expense Sheet (with Manohar / Victor split)
-    expense_ws, exp_copied, exp_skipped = create_expense_sheet(bank_wb, vendor_ws, bank_ws, bank_meta)
+    expense_ws, exp_copied, exp_skipped = create_expense_sheet(
+        bank_wb, vendor_ws, bank_ws, bank_meta, vendor_values_ws
+    )
     print(f"Expense rows generated     : {exp_copied} (Includes Staff Salary split)")
     print(f"Expense rows skipped       : {exp_skipped}")
 
@@ -1760,6 +1823,9 @@ def run_reconciliation(
         )
         print(f"Other income sources entries: {other_unmatched_count} unmatched bank deposits added")
 
+    reimbursement_count = create_reimbursement_sheet(bank_ws, bank_wb, bank_meta)
+    print(f"Reimbursement transfers tracked: {reimbursement_count}")
+
     # Clean Bank Sheet trailing empty lines
     rows_removed = clean_bank_sheet(bank_ws, header_row)
     add_bank_totals_summary(bank_ws, header_row)
@@ -1790,6 +1856,7 @@ def run_reconciliation(
     sheet_order = [
         "Bank_Statement",
         "FD Transactions",
+        "Reimbursement",
         "Income from Other Sources",
         "Expense",
         "Income_recorded_in_nbh",

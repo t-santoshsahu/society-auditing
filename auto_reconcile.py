@@ -457,7 +457,8 @@ def expense_payment_amount(expense_ws, row: int) -> float:
     sgst = rc.numeric_amount(expense_ws.cell(row, rc.VENDOR_COL_SGST).value)
     cgst = rc.numeric_amount(expense_ws.cell(row, rc.VENDOR_COL_CGST).value)
     tds_rate = rc.numeric_amount(expense_ws.cell(row, rc.VENDOR_COL_TDS_RATE).value)
-    return round(amount + sgst + cgst - round(amount * tds_rate / 100, 0), 2)
+    less_excess = rc.numeric_amount(expense_ws.cell(row, rc.VENDOR_COL_LESS_EXCESS).value)
+    return round(amount + sgst + cgst - round(amount * tds_rate / 100, 0) - less_excess, 2)
 
 
 def is_expense_detail_row(expense_ws, row: int) -> bool:
@@ -608,6 +609,53 @@ def link_expense_references_with_bank(expense_ws, bank_ws, bank_meta: dict) -> i
         used_rows.add(top_row)
         linked += 1
     return linked
+
+
+def apply_reimbursement_remarks(wb, bank_ws, bank_meta: dict) -> int:
+    """Mark a reimbursement transfer matched only after a remark is entered."""
+    if "Reimbursement" not in wb.sheetnames:
+        return 0
+
+    reimbursement_ws = wb["Reimbursement"]
+    bank_rows_by_ref: dict[str, list[int]] = {}
+    header_row = bank_meta["header_row"]
+    last_row = rc.find_last_bank_data_row(bank_ws, header_row)
+    for row in range(header_row + 1, last_row + 1):
+        reference = rc.clean_string(bank_ws.cell(row, 6).value).upper()
+        if reference:
+            bank_rows_by_ref.setdefault(reference, []).append(row)
+
+    matched = 0
+    for row in range(2, reimbursement_ws.max_row + 1):
+        remark = rc.clean_string(reimbursement_ws.cell(row, 7).value)
+        reimbursement_ws.cell(row, 6).value = "PENDING"
+        if not remark:
+            continue
+
+        reference = rc.clean_string(reimbursement_ws.cell(row, 4).value).upper()
+        amount = rc.numeric_amount(reimbursement_ws.cell(row, 5).value)
+        candidates = [
+            bank_row for bank_row in bank_rows_by_ref.get(reference, [])
+            if rc.money_equal(
+                rc.numeric_amount(bank_ws.cell(bank_row, bank_meta["debit_col"]).value),
+                amount,
+                tolerance=1.0,
+            )
+        ]
+        if len(candidates) != 1:
+            reimbursement_ws.cell(row, 6).value = "REVIEW (BANK TRANSACTION NOT UNIQUE)"
+            continue
+
+        bank_row = candidates[0]
+        reimbursement_ws.cell(row, 6).value = "MATCHED"
+        bank_ws.cell(bank_row, 8).value = f"Reimbursement: {remark}"
+        bank_ws.cell(bank_row, 9).value = "MATCHED"
+        for column in range(1, 10):
+            bank_ws.cell(bank_row, column).fill = copy(rc.GREEN_FILL)
+        for column in range(1, 8):
+            reimbursement_ws.cell(row, column).fill = copy(rc.GREEN_FILL)
+        matched += 1
+    return matched
 
 
 def link_other_income_with_bank(other_income_ws, bank_ws, bank_meta: dict) -> int:
@@ -1260,6 +1308,23 @@ def merge_draft(old_wb, new_wb) -> None:
                 merged += _copy_columns(old_ws, old_row, new_ws, row, [6])
         colored = reapply_match_highlighting(new_ws, new_header)
         print(f"Bank_Statement           : preserved {merged} generated reference ID(s), highlighted {colored} matched row(s)")
+
+    if "Reimbursement" in old_wb.sheetnames and "Reimbursement" in new_wb.sheetnames:
+        old_ws, new_ws = old_wb["Reimbursement"], new_wb["Reimbursement"]
+        old_headers = _header_map(old_ws)
+        new_headers = _header_map(new_ws)
+        old_ref_col = old_headers.get("GENERATED REFERENCE ID")
+        new_ref_col = new_headers.get("GENERATED REFERENCE ID")
+        old_remark_col = old_headers.get("REMARK")
+        new_remark_col = new_headers.get("REMARK")
+        if old_ref_col and new_ref_col and old_remark_col and new_remark_col:
+            old_index = _index_rows(old_ws, 2, [old_ref_col])
+            merged = 0
+            for row in range(2, new_ws.max_row + 1):
+                old_row = old_index.get(_row_key(new_ws, row, [new_ref_col]))
+                if old_row is not None:
+                    merged += _copy_columns(old_ws, old_row, new_ws, row, [new_remark_col])
+            print(f"Reimbursement           : preserved {merged} remark(s) by bank reference")
 
     if "Expense" in old_wb.sheetnames and "Expense" in new_wb.sheetnames:
         old_ws, new_ws = old_wb["Expense"], new_wb["Expense"]
@@ -2499,6 +2564,16 @@ def cleanup_draft_consistency(wb, bank_ws, bank_meta: dict) -> int:
             if reference:
                 resolved_refs.setdefault(reference, []).append((rc.numeric_amount(ws.cell(row, 6).value) or rc.numeric_amount(ws.cell(row, 7).value), "debit" if rc.numeric_amount(ws.cell(row, 6).value) > 0 else "credit"))
 
+    if "Reimbursement" in wb.sheetnames:
+        ws = wb["Reimbursement"]
+        for row in range(2, ws.max_row + 1):
+            if not rc.clean_string(ws.cell(row, 7).value):
+                continue
+            reference = rc.clean_string(ws.cell(row, 4).value).upper()
+            amount = rc.numeric_amount(ws.cell(row, 5).value)
+            if reference:
+                resolved_refs.setdefault(reference, []).append((amount, "debit"))
+
     for sheet_name in wb.sheetnames:
         if not sheet_name.startswith("Cash Withdrawal "):
             continue
@@ -2649,6 +2724,8 @@ def run_for_month(month_dir: Path, vendor_bills: Optional[Path], data_root: Opti
 
     cash_withdrawal_links = link_cash_withdrawals_with_bank(fresh_wb, bank_ws, bank_meta)
     print(f"Cash withdrawal registers linked to Bank Statement: {cash_withdrawal_links}")
+    reimbursement_links = apply_reimbursement_remarks(fresh_wb, bank_ws, bank_meta)
+    print(f"Reimbursement transfers approved by remark: {reimbursement_links}")
 
     colored_bank = reapply_match_highlighting(bank_ws, bank_meta["header_row"])
 
@@ -2838,6 +2915,7 @@ def _run_current_month_pass(
                 print(f"{month_dir.name}: Other Sources references refreshed after NBH matching: {synced_income_refs}")
                 link_other_income_with_bank(wb["Income from Other Sources"], bank_ws, bank_meta)
     link_cash_withdrawals_with_bank(wb, bank_ws, bank_meta)
+    apply_reimbursement_remarks(wb, bank_ws, bank_meta)
     reapply_match_highlighting(bank_ws, bank_meta["header_row"])
     if "Expense" in wb.sheetnames:
         normalize_tax_and_duties_rows(wb["Expense"])
