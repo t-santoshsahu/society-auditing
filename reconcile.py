@@ -579,6 +579,9 @@ def create_expense_sheet(output_wb, vendor_ws, bank_ws, bank_meta: dict,
         upper_name = name.upper()
         if upper_name.startswith("TDS FOR") or upper_name.startswith("GST FOR"):
             break
+        if "SPONSORSHIP" in upper_name:
+            skipped_rows += 1
+            continue
 
         if not is_real_expense_row(vendor_ws, source_row):
             skipped_rows += 1
