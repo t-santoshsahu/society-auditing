@@ -52,35 +52,58 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>Society Audit Dashboard</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f4f6f9;color:#222}
-header{background:#1f3a5f;color:#fff;padding:14px 24px;display:flex;align-items:center;gap:16px}
-header h1{margin:0;font-size:20px}
-header select{font-size:14px;padding:4px 8px;border-radius:4px}
-.tabs{display:flex;flex-wrap:wrap;gap:4px;padding:10px 24px 0;background:#e3e8ef}
-.tab{padding:8px 18px;border:0;background:#cfd7e3;cursor:pointer;border-radius:6px 6px 0 0;font-size:14px}
-.tab.active{background:#fff;font-weight:600}
-.tab.flag{border-bottom:3px solid #e15759}
+:root{color-scheme:light;--ink:#203535;--muted:#647b79;--deep:#163f3d;--teal:#16877f;--mint:#dff3ef;--coral:#ef765f;--gold:#e9b949;--paper:#fff;--canvas:#edf4f2;--line:#d7e5e1;--red-bg:#fde7e3;--yellow-bg:#fff3cf}
+*{box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:var(--canvas);color:var(--ink);line-height:1.45}
+header{background:linear-gradient(110deg,var(--deep),#206b64);color:#fff;padding:16px 24px;display:flex;align-items:center;gap:16px;border-bottom:4px solid var(--coral)}
+header h1{margin:0;font-size:20px;flex:1}
+header select{font-size:14px;padding:8px 34px 8px 10px;border:1px solid #91c7bd;border-radius:5px;background:#fff;color:var(--deep);font-weight:650;max-width:100%}
+.tabs{display:flex;gap:6px;padding:10px 24px 0;background:#d7e9e5;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin;scrollbar-color:#83b8ae transparent}
+.tab{flex:0 0 auto;padding:9px 15px;border:0;border-top:3px solid transparent;background:#c5ddd7;color:#294b47;cursor:pointer;border-radius:5px 5px 0 0;font-size:13px;font-weight:600;white-space:nowrap}
+.tab:hover{background:#b5d7d0}
+.tab.active{background:var(--paper);border-top-color:var(--coral);color:var(--deep)}
+.tab.flag{box-shadow:inset 0 -3px #d84439}
 .panel{display:none;padding:20px 24px}.panel.active{display:block}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px}
-.card{background:#fff;border-radius:8px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.12);overflow:auto}
-.card h2{margin:0 0 12px;font-size:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:16px;align-items:start}
+.card{background:var(--paper);border:1px solid var(--line);border-top:3px solid var(--teal);border-radius:7px;padding:16px;box-shadow:0 3px 12px rgba(27,71,66,.07);overflow:auto;min-width:0}
+.card:nth-child(3n+2){border-top-color:var(--coral)}.card:nth-child(3n){border-top-color:var(--gold)}
+.card h2{margin:0 0 12px;font-size:16px;line-height:1.35;color:var(--deep)}
 .wide{grid-column:1/-1}
 .chart{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
-.legend div{display:flex;align-items:center;gap:6px;font-size:13px;margin:3px 0}
-.sw{width:12px;height:12px;border-radius:2px;display:inline-block}
-table{border-collapse:collapse;width:100%;font-size:13px}
-th,td{padding:6px 8px;border-bottom:1px solid #e5e9f0;text-align:left}
-th{background:#eef2f7}td.n,th.n{text-align:right}
-tr.total td{font-weight:700;border-top:2px solid #999}
-tr.bad td{background:#fde8e8}
-tr.warn td{background:#fff6cc}
+.chart svg{flex:0 0 auto}
+.legend div{display:flex;align-items:center;gap:6px;font-size:13px;margin:5px 0;color:#35524f}
+.sw{width:12px;height:12px;border-radius:3px;display:inline-block;flex:0 0 auto}
+table{border-collapse:collapse;width:100%;font-size:13px;min-width:480px}
+th,td{padding:8px 9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:#e6f1ee;color:#315450;font-size:12px}td.n,th.n{text-align:right;white-space:nowrap}
+tr:nth-child(even):not(.bad):not(.warn):not(.ok) td{background:#f8fbfa}
+tr.total td{font-weight:700;border-top:2px solid #83aaa2;background:#edf5f2}
+tr.bad td{background:var(--red-bg)}
+tr.warn td{background:var(--yellow-bg)}
 td.red{color:#c62828;font-weight:700}
-tr.ok td{background:#eaf6ea}
-.bar{display:grid;grid-template-columns:150px 1fr 110px;gap:8px;align-items:center;margin:6px 0;font-size:13px}
-.bar .fill{height:16px;border-radius:3px}
-.empty{color:#888;font-style:italic}
-.issues{margin:0 0 12px;padding-left:18px;color:#a12622;font-size:13px}
-.okmsg{color:#2e7d32;font-size:13px;margin:0 0 12px}
+tr.ok td{background:#e4f4e8}
+.bar{display:grid;grid-template-columns:minmax(90px,150px) minmax(60px,1fr) minmax(92px,110px);gap:8px;align-items:center;margin:8px 0;font-size:13px}
+.bar .fill{height:14px;border-radius:3px;background-image:linear-gradient(90deg,rgba(255,255,255,.2),transparent)}
+.empty{color:var(--muted);font-style:italic}
+.issues{margin:0 0 12px;padding:10px 12px;color:#a12622;background:var(--red-bg);border-left:3px solid #d84439;font-size:13px}
+.okmsg{color:#246b40;background:#e4f4e8;border-left:3px solid #4d9b62;font-size:13px;margin:0 0 12px;padding:10px 12px}
+@media(max-width:640px){
+  header{padding:13px 14px;gap:10px;flex-wrap:wrap}
+  header h1{font-size:18px;flex-basis:100%}
+  header select{width:100%}
+  .tabs{padding:8px 10px 0;gap:4px}
+  .tab{padding:8px 12px;font-size:12px}
+  .panel{padding:12px 10px}
+  .grid{grid-template-columns:minmax(0,1fr);gap:10px}
+  .card{padding:13px}
+  .card h2{font-size:15px}
+  .chart{justify-content:center;gap:8px}
+  .chart svg{width:156px;height:156px}
+  .legend{width:100%}
+  .bar{grid-template-columns:minmax(82px,112px) minmax(40px,1fr) minmax(86px,98px);gap:6px;font-size:12px}
+  table{font-size:12px}
+  th,td{padding:7px}
+}
 </style></head><body>
 <header><h1>Society Audit Dashboard</h1><select id="fy"></select></header>
 <div class="tabs" id="tabs"></div><div id="panels"></div>
