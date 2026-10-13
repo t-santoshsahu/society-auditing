@@ -323,8 +323,9 @@ function panel(m){
    +'</div>';
 }
 function renderYear(){
-  DATA.forEach(m=>addTab(m.label,panel(m)));
+    addTab("Annual Dashboard",annualPanel());
   addTab("Monthly Debits",debitsPanel());
+    DATA.forEach(m=>addTab(m.label,panel(m)));
     show(0);
 }
 """

@@ -41,6 +41,26 @@ def find_financial_years(root):
     return [(label, folder) for _, label, folder in sorted(found, reverse=True)]
 
 
+def attach_prior_fy26(datasets, root):
+    if "FY27" not in datasets or not datasets["FY27"]:
+        return
+    root = os.path.abspath(root)
+    data_root = os.path.dirname(root) if FY_DIR.match(os.path.basename(root)) else root
+    workbook = os.path.join(data_root, "FY26_Expense_Bank_Reconciliation.xlsx")
+    if not os.path.exists(workbook):
+        print("FY26 workbook not found; FY27 annual comparison will be omitted:", workbook)
+        return
+
+    import fy26_dashboard
+
+    petty = os.path.join(data_root, "2026-2027", "PettyCash.xlsx")
+    if not os.path.exists(petty):
+        petty = os.path.join(data_root, "PettyCash.xlsx")
+    print("Reading FY26 comparison data", workbook)
+    prior_months = fy26_dashboard.process_fy26(workbook, petty)
+    datasets["FY27"][0]["prior_year_months"] = prior_months
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("root", nargs="?", default="test_data", help="a financial-year folder or a folder containing several")
@@ -52,6 +72,7 @@ def main():
         sys.exit("No <YYYY-YYYY>/<month>/report_*.xlsx files found under %s" % args.root)
 
     datasets = {label: monthly_dashboard.load_year(folder) for label, folder in years}
+    attach_prior_fy26(datasets, args.root)
     output = args.output or os.path.join(os.path.abspath(args.root), "dashboard.html")
     monthly_dashboard.write_dashboard(datasets, output)
 

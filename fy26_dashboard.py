@@ -165,6 +165,8 @@ def process_fy26(workbook_path, petty_path):
                 "flagged": flagged,
             },
         })
+    if months:
+        months[0]["summary"]["reported_other_income"] = 643966.0
     return months
 
 
@@ -205,9 +207,10 @@ function cashPanel(){
   return '<div class="grid">'+card("Cash transactions by month (red = no petty cash details found)",note+table(cols,rows,"No data"),1)+'</div>';
 }
 function renderYear(){
-  DATA.forEach(m=>addTab(m.label,panelFY26(m),m.cash_details.flagged));
+    addTab("Annual Dashboard",annualPanel());
     addTab("Monthly Expense & Debits",expenseDebitPanel());
     addTab("Cash Transactions",cashPanel(),DATA.some(m=>m.cash_details.flagged));
+    DATA.forEach(m=>addTab(m.label,panelFY26(m),m.cash_details.flagged));
   show(0);
 }
 """
