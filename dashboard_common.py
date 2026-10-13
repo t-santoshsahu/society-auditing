@@ -58,11 +58,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0
 header{background:linear-gradient(110deg,var(--deep),#206b64);color:#fff;padding:16px 24px;display:flex;align-items:center;gap:16px;border-bottom:4px solid var(--coral)}
 header h1{margin:0;font-size:20px;flex:1}
 header select{font-size:14px;padding:8px 34px 8px 10px;border:1px solid #91c7bd;border-radius:5px;background:#fff;color:var(--deep);font-weight:650;max-width:100%}
-.tabs{display:flex;gap:6px;padding:10px 24px 0;background:#d7e9e5;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin;scrollbar-color:#83b8ae transparent}
-.tab{flex:0 0 auto;padding:9px 15px;border:0;border-top:3px solid transparent;background:#c5ddd7;color:#294b47;cursor:pointer;border-radius:5px 5px 0 0;font-size:13px;font-weight:600;white-space:nowrap}
-.tab:hover{background:#b5d7d0}
-.tab.active{background:var(--paper);border-top-color:var(--coral);color:var(--deep)}
-.tab.flag{box-shadow:inset 0 -3px #d84439}
+.current-section{display:none}
+.dashboard-shell{display:grid;grid-template-columns:230px minmax(0,1fr);min-height:calc(100vh - 68px)}
+.sidebar{position:sticky;top:0;height:calc(100vh - 68px);overflow-y:auto;background:#d7e9e5;border-right:1px solid #c1d9d3;padding:14px 10px}
+.sidebar-title{margin:2px 8px 10px;color:#52726d;font-size:11px;font-weight:750;text-transform:uppercase}
+.tabs{display:flex;flex-direction:column;gap:4px;padding:0;background:transparent;overflow:visible}
+.tab{width:100%;text-align:left;padding:10px 12px;border:0;border-left:3px solid transparent;background:transparent;color:#294b47;cursor:pointer;border-radius:4px;font-size:13px;font-weight:600;white-space:normal;line-height:1.3}
+.tab:hover{background:#c5ddd7}
+.tab.active{background:var(--paper);border-left-color:var(--coral);color:var(--deep);box-shadow:0 1px 4px rgba(27,71,66,.08)}
+.tab.flag{box-shadow:inset 3px 0 #d84439}
+.panels{min-width:0}
+.nav-toggle,.nav-scrim{display:none}
 .panel{display:none;padding:20px 24px}.panel.active{display:block}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:16px;align-items:start}
 .card{background:var(--paper);border:1px solid var(--line);border-top:3px solid var(--teal);border-radius:7px;padding:16px;box-shadow:0 3px 12px rgba(27,71,66,.07);overflow:auto;min-width:0}
@@ -88,11 +94,19 @@ tr.ok td{background:#e4f4e8}
 .issues{margin:0 0 12px;padding:10px 12px;color:#a12622;background:var(--red-bg);border-left:3px solid #d84439;font-size:13px}
 .okmsg{color:#246b40;background:#e4f4e8;border-left:3px solid #4d9b62;font-size:13px;margin:0 0 12px;padding:10px 12px}
 @media(max-width:640px){
-  header{padding:13px 14px;gap:10px;flex-wrap:wrap}
-  header h1{font-size:18px;flex-basis:100%}
-  header select{width:100%}
-  .tabs{padding:8px 10px 0;gap:4px}
-  .tab{padding:8px 12px;font-size:12px}
+  header{padding:11px 12px;gap:9px;flex-wrap:wrap}
+  header h1{font-size:17px;flex:1 1 auto;min-width:0}
+  header select{width:auto;max-width:42%;padding:8px}
+  .current-section{display:block;flex-basis:100%;order:4;padding:5px 9px;border-left:3px solid var(--gold);background:rgba(255,255,255,.1);font-size:13px;font-weight:650;line-height:1.3}
+  .dashboard-shell{display:block;min-height:calc(100vh - 64px)}
+  .nav-toggle{display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;flex:0 0 40px;border:1px solid #77aaa0;border-radius:5px;background:#fff;color:var(--deep);font-size:22px;line-height:1;cursor:pointer}
+  .sidebar{position:fixed;z-index:20;top:0;bottom:0;left:0;width:min(82vw,310px);height:100dvh;transform:translateX(-105%);transition:transform .2s ease;box-shadow:8px 0 24px rgba(20,55,51,.18);padding:18px 12px}
+  body.nav-open .sidebar{transform:translateX(0)}
+  .nav-scrim{position:fixed;inset:0;z-index:19;background:rgba(17,43,40,.45)}
+  body.nav-open .nav-scrim{display:block}
+  .sidebar-title{font-size:12px;margin:4px 10px 14px}
+  .tabs{gap:5px}
+  .tab{min-height:44px;padding:11px 12px;font-size:14px}
   .panel{padding:12px 10px}
   .grid{grid-template-columns:minmax(0,1fr);gap:10px}
   .card{padding:13px}
@@ -105,8 +119,8 @@ tr.ok td{background:#e4f4e8}
   th,td{padding:7px}
 }
 </style></head><body>
-<header><h1>Society Audit Dashboard</h1><select id="fy"></select></header>
-<div class="tabs" id="tabs"></div><div id="panels"></div>
+<header><button class="nav-toggle" id="navToggle" type="button" aria-label="Open dashboard sections" aria-expanded="false">&#9776;</button><h1>Society Audit Dashboard</h1><select id="fy" aria-label="Financial year"></select><div class="current-section" id="currentSection" aria-live="polite"></div></header>
+<div class="dashboard-shell"><aside class="sidebar" id="sidebar"><div class="sidebar-title">Dashboard sections</div><nav class="tabs" id="tabs" aria-label="Dashboard sections"></nav></aside><button class="nav-scrim" id="navScrim" type="button" aria-label="Close dashboard sections"></button><main class="panels" id="panels"></main></div>
 <script>
 const DATASETS=__DATA__;let DATA=[];const SQFT=__SQFT__;
 const COLORS=["#4e79a7","#f28e2b","#59a14f","#e15759","#76b7b2","#edc948","#b07aa1","#ff9da7","#9c755f","#bab0ac"];
@@ -114,6 +128,10 @@ const STATUS_COLORS={"Matched":"#59a14f","Partially matched":"#edc948","Unmatche
 const inr=v=>Number(v).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2});
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const tabs=document.getElementById("tabs"),panels=document.getElementById("panels");
+const navToggle=document.getElementById("navToggle");
+function closeNav(){document.body.classList.remove("nav-open");navToggle.setAttribute("aria-expanded","false");}
+navToggle.onclick=()=>{const open=document.body.classList.toggle("nav-open");navToggle.setAttribute("aria-expanded",String(open));};
+document.getElementById("navScrim").onclick=closeNav;
 const card=(t,b,w)=>`<div class="card ${w?'wide':''}"><h2>${t}</h2>${b}</div>`;
 function pie(items,colorOf,fmt){
   const total=items.reduce((a,i)=>a+i.value,0);
@@ -141,13 +159,14 @@ function table(cols,rows,empty){
 }
 function debitsPanel(){
   const items=DATA.map(m=>({label:m.label,value:m.debits.net}));
-  const rows=DATA.map(m=>({month:m.label,...m.debits}));
-  rows.forEach(r=>r.rate=(r.net/SQFT).toFixed(4));
-  const cols=[{h:"Month",k:"month"},{h:"All debits",k:"gross",n:1},{h:"FD transactions (excluded)",k:"fd",n:1},{h:"Sponsorship payout (excluded)",k:"reimbursement",n:1},{h:"Net debited",k:"net",n:1},{h:`Rate per sqft (&#8377;, ${SQFT.toLocaleString("en-IN")} sqft)`,k:"rate",r:1}];
-  return '<div class="grid"><div class="card wide"><h2>Money debited from account per month (excluding FD transactions and sponsorship payouts)</h2>'+bars(items,true)+'</div>'
+  const hasLiftAmc=DATA.some(m=>m.summary&&m.summary.lift_amc);
+  const rows=DATA.map(m=>({month:m.label,gross:m.debits.gross,exclusions:m.debits.exclusions.map(x=>`${x.label}: INR ${inr(x.amount)}`).join("; ")||"None",net:m.debits.net,rate:(m.debits.net/SQFT).toFixed(4),rateWithAmc:((m.debits.net+(m.summary?.lift_amc||0))/SQFT).toFixed(4)}));
+  const cols=[{h:"Month",k:"month"},{h:"All debits",k:"gross",n:1},{h:"Exclusions",k:"exclusions"},{h:"Net debited",k:"net",n:1},{h:`Rate per sqft (&#8377;, ${SQFT.toLocaleString("en-IN")} sqft)`,k:"rate",r:1}];
+  if(hasLiftAmc)cols.push({h:`Rate per sqft + lift AMC (&#8377;, ${SQFT.toLocaleString("en-IN")} sqft)`,k:"rateWithAmc",r:1});
+  return '<div class="grid"><div class="card wide"><h2>Money debited from account per month, less listed exclusions</h2>'+bars(items,true)+'</div>'
     +'<div class="card wide"><h2>Debit breakup</h2>'+table(cols,rows,"No data")+'</div></div>';
 }
-function show(i){[...tabs.children].forEach((t,j)=>t.classList.toggle("active",i===j));[...panels.children].forEach((p,j)=>p.classList.toggle("active",i===j));}
+function show(i){[...tabs.children].forEach((t,j)=>{t.classList.toggle("active",i===j);t.setAttribute("aria-current",i===j?"page":"false");});[...panels.children].forEach((p,j)=>p.classList.toggle("active",i===j));document.getElementById("currentSection").textContent="Viewing: "+(tabs.children[i]?.textContent||"");closeNav();}
 function addTab(label,html,flag){
   const idx=tabs.children.length;
   const b=document.createElement("button");b.className="tab"+(flag?" flag":"");b.textContent=label;b.onclick=()=>show(idx);tabs.appendChild(b);

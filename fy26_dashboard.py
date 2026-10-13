@@ -15,6 +15,8 @@ from dashboard_common import build_page, categorize_expense, fmt_date, num
 
 MONTH_NAMES = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 LABEL = "FY26"
+LIFT_AMC_ANNUAL = 904999.0
+LIFT_AMC_MONTHLY = LIFT_AMC_ANNUAL / 12
 
 
 def month_key(text):
@@ -94,7 +96,7 @@ def process_fy26(workbook_path, petty_path):
         # TDS/GST remittance rows are tax payments, not expenses.
         if re.match(r"\s*(paid\s+)?(tds|gst)\b|.*your\s*self.*gst", str(row[3]), re.I):
             continue
-        amount = num(row[7]) or num(row[6])
+        amount = num(row[6])
         label = categorize_expense(row[3])
         cats = bills.setdefault(str(row[0]), {})
         cats[label] = cats.get(label, 0.0) + amount
@@ -116,6 +118,7 @@ def process_fy26(workbook_path, petty_path):
     for month in month_order:
         cats = dict(bills.get(month, {}))
         bill_total = sum(cats.values())
+        cats["Lift AMC (annual allocation)"] = LIFT_AMC_MONTHLY
         withdrawals = cash.get(month, [])
         cash_total = sum(w["amount"] for w in withdrawals)
         if cash_total:
@@ -147,7 +150,10 @@ def process_fy26(workbook_path, petty_path):
             "summary": {
                 "bill_expense": round(bill_total, 2),
                 "cash": round(cash_total, 2),
-                "total_expense": round(bill_total + cash_total, 2),
+                "lift_amc": round(LIFT_AMC_MONTHLY, 2),
+                "recurring_expense": round(sum(v for k, v in bills.get(month, {}).items() if k != "Others") + LIFT_AMC_MONTHLY, 2),
+                "other_expense": round(bills.get(month, {}).get("Others", 0.0), 2),
+                "total_expense": round(bill_total + cash_total + LIFT_AMC_MONTHLY, 2),
             },
             "debits": {"gross": round(gross, 2), "fd": round(fd, 2), "reimbursement": 0.0, "net": round(gross - fd, 2)},
             "cash_details": {
@@ -166,25 +172,27 @@ BODY_JS = """
 function panelFY26(m){
   const row=(l,v,cls)=>`<tr class="${cls||''}"><td>${l}</td><td class="n">${inr(v)}</td><td class="n">${(v/SQFT).toFixed(4)}</td></tr>`;
   const s=m.summary;
+    const amcNote=`<p class="okmsg">Lift AMC: INR 904,999 / 12 = INR ${inr(s.lift_amc)} per month, or INR ${(s.lift_amc/SQFT).toFixed(4)} per sqft per month.</p>`;
   const sum=`<table><tr><th>Item</th><th class="n">Amount (&#8377;)</th><th class="n">Per sqft (&#8377;, ${SQFT.toLocaleString("en-IN")} sqft)</th></tr>`
-    +row("Vendor bills",s.bill_expense)+row("Cash withdrawals",s.cash)+row("Total expense (maintenance rate)",s.total_expense,"total")+'</table>';
+        +row("Recurring (includes lift AMC allocation)",s.recurring_expense)+row("Other",s.other_expense)+row("Cash Withdrawals",s.cash)
+        +row("Total expense (maintenance rate)",s.total_expense,"total")+'</table>';
   const c=m.cash_details;
   const cashCols=[{h:"Date",k:"date"},{h:"Bank narration",k:"description"},{h:"Amount",k:"amount",n:1},{h:"Petty cash details",k:"status"}];
   const msg=c.withdrawals.length?`<p class="${c.flagged?'issues':'okmsg'}">${esc(c.status)}</p>`:'';
   return '<div class="grid">'
     +card("Expense per category (including cash withdrawals)",bars(m.expense_categories))
     +card("Breakup of Others expense",bars(m.others_breakup))
-    +card("Summary and maintenance rate",sum)
+    +card("Summary and maintenance rate",amcNote+sum)
     +card("Cash transactions",msg+table(cashCols,c.withdrawals,"No cash withdrawals this month"),1)+'</div>';
 }
 function expenseDebitPanel(){
   const items=DATA.map(m=>({label:m.label,value:m.summary.total_expense}));
   const debitItems=DATA.map(m=>({label:m.label,value:m.debits.net}));
   const rate=v=>(v/SQFT).toFixed(4);
-  const rows=DATA.map(m=>({month:m.label,bill:m.summary.bill_expense,cash:m.summary.cash,total:m.summary.total_expense,rate:rate(m.summary.total_expense),gross:m.debits.gross,fd:m.debits.fd,net:m.debits.net,debitRate:rate(m.debits.net)}));
+    const rows=DATA.map(m=>({month:m.label,recurring:m.summary.recurring_expense,other:m.summary.other_expense,cash:m.summary.cash,total:m.summary.total_expense,rate:rate(m.summary.total_expense),gross:m.debits.gross,fd:m.debits.fd,net:m.debits.net,debitRate:rate(m.debits.net)}));
   const sq=`(&#8377;, ${SQFT.toLocaleString("en-IN")} sqft)`;
-  const cols=[{h:"Month",k:"month"},{h:"Vendor bills",k:"bill",n:1},{h:"Cash withdrawals",k:"cash",n:1},{h:"Total expense",k:"total",n:1},{h:`Maintenance rate per sqft ${sq}`,k:"rate",r:1},{h:"All bank debits",k:"gross",n:1},{h:"FD transactions (excluded)",k:"fd",n:1},{h:"Net debited",k:"net",n:1},{h:`Debit rate per sqft ${sq}`,k:"debitRate",r:1}];
-  return '<div class="grid"><div class="card"><h2>Monthly expense (including cash withdrawals)</h2>'+bars(items,true)+'</div>'
+    const cols=[{h:"Month",k:"month"},{h:"Recurring (incl. lift AMC)",k:"recurring",n:1},{h:"Other",k:"other",n:1},{h:"Cash Withdrawals",k:"cash",n:1},{h:"Total expense",k:"total",n:1},{h:`Maintenance rate per sqft ${sq}`,k:"rate",r:1},{h:"All bank debits",k:"gross",n:1},{h:"FD transactions (excluded)",k:"fd",n:1},{h:"Net debited",k:"net",n:1},{h:`Debit rate per sqft ${sq}`,k:"debitRate",r:1}];
+    return '<div class="grid"><div class="card"><h2>Monthly expense (including cash withdrawals and lift AMC allocation)</h2>'+bars(items,true)+'</div>'
     +'<div class="card"><h2>Money debited from account per month (excluding FD transactions)</h2>'+bars(debitItems,true)+'</div>'
     +'<div class="card wide"><h2>Monthly expense, bank debits and rates</h2>'+table(cols,rows,"No data")+'</div></div>';
 }
@@ -197,9 +205,9 @@ function cashPanel(){
   return '<div class="grid">'+card("Cash transactions by month (red = no petty cash details found)",note+table(cols,rows,"No data"),1)+'</div>';
 }
 function renderYear(){
-  addTab("Monthly Expense & Debits",expenseDebitPanel());
-  addTab("Cash Transactions",cashPanel(),DATA.some(m=>m.cash_details.flagged));
   DATA.forEach(m=>addTab(m.label,panelFY26(m),m.cash_details.flagged));
+    addTab("Monthly Expense & Debits",expenseDebitPanel());
+    addTab("Cash Transactions",cashPanel(),DATA.some(m=>m.cash_details.flagged));
   show(0);
 }
 """

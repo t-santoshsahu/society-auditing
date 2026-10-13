@@ -9,6 +9,7 @@ import openpyxl
 from dashboard_common import build_page, categorize_expense, fmt_date, num
 
 MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+LIFT_AMC_MONTHLY = 904999.0 / 12
 
 
 def is_matched(status):
@@ -112,29 +113,74 @@ def expense_total(row):
     return num(row[19]) or num(row[11])
 
 
-def bank_debits(bank):
+def normalized_bill_number(value):
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def display_text(value):
+    text = re.sub(r"\s*RS\s*\(\s*3780\s+PAID\s+BY\s+KISHORE\s*\)\s*", " ", str(value or ""), flags=re.I)
+    return " ".join(text.split())
+
+
+def report_expense_category(name):
+    text = str(name or "").lower()
+    if "gowthami" in text and any(term in text for term in ("stp system service", "sand filter service")):
+        return "Others"
+    return categorize_expense(name)
+
+
+def bank_debits(bank, report_month):
     gross = fd = reimbursement = 0.0
+    vendor_exclusions = {}
+    reference_exclusions = {
+        "Apr 2026": {
+            "807960": "Gowthami sand filter service",
+            "807961": "Gowthami bill #945",
+        },
+    }.get(report_month, {})
     for row in bank:
         amount = num(row[3])
         if amount <= 0:
             continue
         narration = str(row[1] or "").upper()
         description = str(row[7] or "").upper()
+        status = str(row[8] or "").upper()
+        detail = " ".join((narration, description, status))
         gross += amount
         if description.startswith("FD ") or "TO FD" in narration:
             fd += amount
         elif description.startswith("REIMBURSEMENT") or "REIMBURS" in narration:
             reimbursement += amount
+        elif str(row[5] or "").strip() in reference_exclusions:
+            label = reference_exclusions[str(row[5]).strip()]
+            vendor_exclusions[label] = vendor_exclusions.get(label, 0.0) + amount
+        elif "OTIS" in detail:
+            vendor_exclusions["OTIS"] = vendor_exclusions.get("OTIS", 0.0) + amount
+        elif "IT DEPARTMENT" in detail:
+            vendor_exclusions["IT Department"] = vendor_exclusions.get("IT Department", 0.0) + amount
+    exclusions = []
+    if fd:
+        exclusions.append({"label": "FD transactions", "amount": round(fd, 2)})
+    if reimbursement:
+        exclusions.append({"label": "Sponsorship payout", "amount": round(reimbursement, 2)})
+    exclusions.extend(
+        {"label": label, "amount": round(amount, 2)}
+        for label, amount in vendor_exclusions.items()
+    )
+    excluded_total = fd + reimbursement + sum(vendor_exclusions.values())
     return {
         "gross": round(gross, 2),
         "fd": round(fd, 2),
         "reimbursement": round(reimbursement, 2),
-        "net": round(gross - fd - reimbursement, 2),
+        "exclusions": exclusions,
+        "excluded_total": round(excluded_total, 2),
+        "net": round(gross - excluded_total, 2),
     }
 
 
 def process_report(path):
     wb = openpyxl.load_workbook(path, data_only=True)
+    lift_amc = LIFT_AMC_MONTHLY if os.path.basename(os.path.dirname(os.path.dirname(path))) == "2026-2027" else 0.0
     bank = read_bank(wb["Bank_Statement"])
     nbh = [
         r for r in wb["Income_recorded_in_nbh"].iter_rows(min_row=2, values_only=True)
@@ -163,16 +209,27 @@ def process_report(path):
     expense_cat = {}
     others_breakup = {}
     paid_refs = set()
+    april_excluded_bills = {"35", "945", "944", "inv00087"}
+    report_month = month_label(path)
+    excluded_vendors = {
+        "Jun 2026": ("otis",),
+        "Jul 2026": ("it department",),
+    }
     for row in expenses:
         for ref in re.split(r"[,\s]+", str(row[15] or "")):
             if ref:
                 paid_refs.add(ref)
         if row[18] == "Tax and Duties":
             continue
-        label = categorize_expense(row[4])
+        vendor_name = str(row[4] or "").lower()
+        if report_month == "Apr 2026" and normalized_bill_number(row[3]) in april_excluded_bills:
+            continue
+        if any(name in vendor_name for name in excluded_vendors.get(report_month, ())):
+            continue
+        label = report_expense_category(row[4])
         expense_cat[label] = expense_cat.get(label, 0.0) + expense_total(row)
         if label == "Others":
-            vendor = " ".join(str(row[4]).split())
+            vendor = display_text(row[4])
             others_breakup[vendor] = others_breakup.get(vendor, 0.0) + expense_total(row)
 
     # Cash withdrawals not already represented by an expense row
@@ -194,7 +251,7 @@ def process_report(path):
     unreconciled_bank = [
         {
             "date": fmt_date(r[0]),
-            "narration": " ".join(str(r[1] or "").split()),
+            "narration": display_text(r[1]),
             "ref": str(r[5] or ""),
             "debit": num(r[3]),
             "credit": num(r[4]),
@@ -206,7 +263,7 @@ def process_report(path):
     unreconciled_expense = [
         {
             "bill": str(row[3] or "").strip(),
-            "name": str(row[4]).strip(),
+            "name": display_text(row[4]),
             "billing_month": str(row[2] or ""),
             "invoice_total": expense_total(row),
             "bank_paid": num(row[19]),
@@ -219,7 +276,7 @@ def process_report(path):
 
     return {
         "label": month_label(path),
-        "debits": bank_debits(bank),
+        "debits": bank_debits(bank, month_label(path)),
         "bank_pie": count_buckets(r[8] for r in bank),
         "income_pie": count_buckets([r[13] for r in nbh] + [r[15] for r in other]),
         "income_categories": [{"label": k, "value": v} for k, v in sorted(income_cat.items(), key=lambda x: -x[1])],
@@ -232,8 +289,11 @@ def process_report(path):
         ],
         "summary": {
             "total_expense": total_expense,
-            "other_income": other_income,
-            "net": round(total_expense - other_income, 2),
+            "lift_amc": round(lift_amc, 2),
+            "total_with_lift_amc": round(total_expense + lift_amc, 2),
+            "recurring_expense": round(sum(v for k, v in expense_cat.items() if k not in ("Others", "Cash Withdrawals")), 2),
+            "other_expense": round(expense_cat.get("Others", 0.0), 2),
+            "cash_withdrawals": round(expense_cat.get("Cash Withdrawals", 0.0), 2),
         },
         "unreconciled_bank": unreconciled_bank,
         "unreconciled_expense": unreconciled_expense,
@@ -244,8 +304,9 @@ BODY_JS = """
 function summary(s){
   const row=(l,v,cls)=>`<tr class="${cls||''}"><td>${l}</td><td class="n">${inr(v)}</td><td class="n">${(v/SQFT).toFixed(4)}</td></tr>`;
   return `<table><tr><th>Item</th><th class="n">Amount (&#8377;)</th><th class="n">Per sqft (&#8377;, ${SQFT.toLocaleString("en-IN")} sqft)</th></tr>`
-    +row("Total expense",s.total_expense)+row("Other income (without GST)",s.other_income)
-    +row("Net to be recovered (expense - other income)",s.net,"total")+'</table>';
+        +row("Recurring",s.recurring_expense)+row("Other",s.other_expense)+row("Cash Withdrawals",s.cash_withdrawals)
+    +row("Total expense",s.total_expense,"total")+row("Lift AMC",s.lift_amc)
+    +row("Total including lift AMC",s.total_with_lift_amc,"total")+'</table>';
 }
 function panel(m){
   const cnt=v=>v+"";
@@ -264,7 +325,7 @@ function panel(m){
 function renderYear(){
   DATA.forEach(m=>addTab(m.label,panel(m)));
   addTab("Monthly Debits",debitsPanel());
-  show(DATA.length-1);
+    show(0);
 }
 """
 
