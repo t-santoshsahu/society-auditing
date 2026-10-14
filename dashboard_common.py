@@ -228,20 +228,18 @@ function annualPanel(){
   let comparison="";
   const prior=months[0].prior_year_months;
   if(prior&&prior.length){
-    const currentComparable=months.slice(0,Math.min(n,prior.length));
-    const priorComparable=prior.slice(0,currentComparable.length);
-    const currentTotals=annualCategories(currentComparable,true);
-    const priorTotals=annualCategories(priorComparable,true);
-    const currentMap=Object.fromEntries(currentTotals.map(x=>[x.label,x.value]));
-    const priorMap=Object.fromEntries(priorTotals.map(x=>[x.label,x.value]));
+    const priorMonths=prior.length;
+    const currentMonths=months.length;
+    const currentTotals=annualCategories(months,true);
+    const priorTotals=annualCategories(prior,true);
+    const currentMap=Object.fromEntries(currentTotals.map(x=>[x.label,x.value/currentMonths]));
+    const priorMap=Object.fromEntries(priorTotals.map(x=>[x.label,x.value/priorMonths]));
     const names=[...new Set([...Object.keys(priorMap),...Object.keys(currentMap)])].sort();
-    const compRows=names.map(label=>({label,prior:priorMap[label]||0,current:currentMap[label]||0,change:(currentMap[label]||0)-(priorMap[label]||0),pct:label.toLowerCase()==="others"?"—":priorMap[label]?(((currentMap[label]||0)-priorMap[label])*100/priorMap[label]).toFixed(1)+"%":"N/A"}));
-    const comparableCurrent=currentComparable.reduce((s,m)=>s+(m.summary.total_with_lift_amc||m.summary.total_expense),0);
-    const comparablePrior=priorComparable.reduce((s,m)=>s+(m.summary.total_with_lift_amc||m.summary.total_expense),0);
-    compRows.push({label:"TOTAL",prior:comparablePrior,current:comparableCurrent,change:comparableCurrent-comparablePrior,pct:comparablePrior?((comparableCurrent-comparablePrior)*100/comparablePrior).toFixed(1)+"%":"N/A",cls:"total"});
-    const priorPeriod=`${priorComparable[0].label}–${priorComparable[priorComparable.length-1].label}`;
-    const currentPeriod=`${currentComparable[0].label}–${currentComparable[currentComparable.length-1].label}`;
-    comparison=card(`Previous-year comparison (${currentComparable.length} months, including cash and lift AMC)`,table([{h:"Category",k:"label"},{h:priorPeriod,k:"prior",n:1},{h:currentPeriod,k:"current",n:1},{h:"Change (&#8377;)",k:"change",n:1},{h:"Change (%)",k:"pct",r:1}],compRows,"No comparison data"),1);
+    const compRows=names.map(label=>({label,prior:priorMap[label]||0,current:currentMap[label]||0,change:(currentMap[label]||0)-(priorMap[label]||0),pct:priorMap[label]?(((currentMap[label]||0)-priorMap[label])*100/priorMap[label]).toFixed(1)+"%":"N/A"}));
+    const currentAverage=months.reduce((s,m)=>s+(m.summary.total_with_lift_amc||m.summary.total_expense),0)/currentMonths;
+    const priorAverage=prior.reduce((s,m)=>s+(m.summary.total_with_lift_amc||m.summary.total_expense),0)/priorMonths;
+    compRows.push({label:"TOTAL",prior:priorAverage,current:currentAverage,change:currentAverage-priorAverage,pct:priorAverage?((currentAverage-priorAverage)*100/priorAverage).toFixed(1)+"%":"N/A",cls:"total"});
+    comparison=card("Previous-year comparison (monthly averages, including cash and lift AMC)",table([{h:"Category",k:"label"},{h:`Prior year avg/month (${priorMonths} months)`,k:"prior",n:1},{h:`Current year avg/month (${currentMonths} reports)`,k:"current",n:1},{h:"Average change (&#8377;/month)",k:"change",n:1},{h:"Change (%)",k:"pct",r:1}],compRows,"No comparison data"),1);
   }
   return '<div class="grid annual-panel">'
     +card("Broad expenditure: recurring, other and cash",annualTable(broadCols,broadRows,"No data"),1)

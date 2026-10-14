@@ -194,8 +194,9 @@ function expenseDebitPanel(){
     const rows=DATA.map(m=>({month:m.label,recurring:m.summary.recurring_expense,other:m.summary.other_expense,cash:m.summary.cash,total:m.summary.total_expense,rate:rate(m.summary.total_expense),gross:m.debits.gross,fd:m.debits.fd,net:m.debits.net,debitRate:rate(m.debits.net)}));
   const sq=`(&#8377;, ${SQFT.toLocaleString("en-IN")} sqft)`;
     const cols=[{h:"Month",k:"month"},{h:"Recurring (incl. lift AMC)",k:"recurring",n:1},{h:"Other",k:"other",n:1},{h:"Cash Withdrawals",k:"cash",n:1},{h:"Total expense",k:"total",n:1},{h:`Maintenance rate per sqft ${sq}`,k:"rate",r:1},{h:"All bank debits",k:"gross",n:1},{h:"FD transactions (excluded)",k:"fd",n:1},{h:"Net debited",k:"net",n:1},{h:`Debit rate per sqft ${sq}`,k:"debitRate",r:1}];
-    return '<div class="grid"><div class="card"><h2>Monthly expense (including cash withdrawals and lift AMC allocation)</h2>'+bars(items,true)+'</div>'
-    +'<div class="card"><h2>Money debited from account per month (excluding FD transactions)</h2>'+bars(debitItems,true)+'</div>'
+    return '<div class="grid">'
+    +'<div class="card"><h2>Monthly expense (including cash withdrawals and lift AMC allocation)</h2>'+bars(items,false)+'</div>'
+    +'<div class="card"><h2>Money debited from account per month (excluding FD transactions)</h2>'+bars(debitItems,false)+'</div>'
     +'<div class="card wide"><h2>Monthly expense, bank debits and rates</h2>'+table(cols,rows,"No data")+'</div></div>';
 }
 function cashPanel(){
