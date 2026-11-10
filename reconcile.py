@@ -302,7 +302,7 @@ def generate_reference_id(
         return match.group(1)
 
     # YES Bank NEFT
-    match = re.search(r'\b(YESAP[A-Z0-9]+)\s*(\d+)\b', normalized, re.IGNORECASE)
+    match = re.search(r'\b(YESA[PQ][A-Z0-9]+)\s*(\d+)\b', normalized, re.IGNORECASE)
     if match:
         return match.group(1) + match.group(2)
 

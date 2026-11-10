@@ -1,2 +1,5 @@
 test_data/
-__pycache__//
+__pycache__/
+test_data.orig/
+test_yes_bank_references.py
+

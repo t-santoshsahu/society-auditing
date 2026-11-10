@@ -1282,6 +1282,7 @@ def reapply_match_highlighting(bank_ws, header_row: int) -> int:
 def merge_draft(old_wb, new_wb) -> None:
     """Carry only stable identifiers from the previous draft into a fresh one."""
 
+    migrated_bank_refs: dict[str, str] = {}
     old_fd_references = set()
     if "FD Transactions" in old_wb.sheetnames:
         old_fd_ws = old_wb["FD Transactions"]
@@ -1305,7 +1306,20 @@ def merge_draft(old_wb, new_wb) -> None:
         for row in range(new_header + 1, new_ws.max_row + 1):
             old_row = old_index.get(_row_key(new_ws, row, new_keys))
             if old_row is not None:
-                merged += _copy_columns(old_ws, old_row, new_ws, row, [6])
+                old_reference = rc.clean_string(old_ws.cell(old_row, 6).value).upper()
+                new_reference = rc.clean_string(new_ws.cell(row, 6).value).upper()
+                transaction_date = new_ws.cell(row, new_keys[0]).value
+                narration = rc.clean_string(new_ws.cell(row, new_keys[1]).value)
+                debit = rc.numeric_amount(new_ws.cell(row, new_keys[2]).value)
+                credit = rc.numeric_amount(new_ws.cell(row, new_keys[3]).value)
+                fallback_hashes = {
+                    rc.generate_hash_id(narration, value, debit, credit)
+                    for value in (transaction_date, rc.parse_date(transaction_date))
+                }
+                if new_reference.startswith("YESAQ") and old_reference in fallback_hashes:
+                    migrated_bank_refs[old_reference] = new_reference
+                else:
+                    merged += _copy_columns(old_ws, old_row, new_ws, row, [6])
         colored = reapply_match_highlighting(new_ws, new_header)
         print(f"Bank_Statement           : preserved {merged} generated reference ID(s), highlighted {colored} matched row(s)")
 
@@ -1377,11 +1391,22 @@ def merge_draft(old_wb, new_wb) -> None:
                 ):
                     columns = [column for column in columns if column != new_headers.get("BANK REFERENCE ID")]
                 merged += _copy_columns(old_ws, old_row, new_ws, row, columns)
+                bank_ref_col = new_headers.get("BANK REFERENCE ID")
+                if bank_ref_col:
+                    reference = rc.clean_string(new_ws.cell(row, bank_ref_col).value).upper()
+                    if reference in migrated_bank_refs:
+                        new_ws.cell(row, bank_ref_col).value = migrated_bank_refs[reference]
             print(f"Income_recorded_in_nbh   : preserved {merged} identifier(s) by stable row fields")
 
     if "Income from Other Sources" in old_wb.sheetnames and "Income from Other Sources" in new_wb.sheetnames:
         old_ws, new_ws = old_wb["Income from Other Sources"], new_wb["Income from Other Sources"]
         old_index = _index_rows(old_ws, 2, [1])
+        old_deposit_rows: dict[str, list[int]] = {}
+        for old_row in range(2, old_ws.max_row + 1):
+            old_bill = rc.clean_string(old_ws.cell(old_row, 1).value).upper()
+            old_reference = rc.clean_string(old_ws.cell(old_row, 14).value).upper()
+            if re.fullmatch(r"[A-F0-9]{16}", old_bill) and old_reference in migrated_bank_refs:
+                old_deposit_rows.setdefault(migrated_bank_refs[old_reference], []).append(old_row)
         generated_bill_numbers = {
             rc.clean_string(old_ws.cell(row, 17).value).upper()
             for row in range(2, old_ws.max_row + 1)
@@ -1397,9 +1422,15 @@ def merge_draft(old_wb, new_wb) -> None:
         merged = 0
         for row in range(2, new_ws.max_row + 1):
             old_row = old_index.get(_row_key(new_ws, row, [1]))
+            if old_row is None and re.fullmatch(r"[A-F0-9]{16}", rc.clean_string(new_ws.cell(row, 1).value).upper()):
+                reference = rc.clean_string(new_ws.cell(row, 14).value).upper()
+                candidates = old_deposit_rows.get(reference, [])
+                if len(candidates) == 1:
+                    old_row = candidates[0]
             if old_row is not None:
                 merged += _copy_columns(old_ws, old_row, new_ws, row, [2, 12, 17])
                 old_reference = old_ws.cell(old_row, 14).value
+                old_reference = migrated_bank_refs.get(rc.clean_string(old_reference).upper(), old_reference)
                 new_reference = new_ws.cell(row, 14).value
                 if new_reference in (None, "") and old_reference not in (None, ""):
                     new_ws.cell(row, 14).value = old_reference
